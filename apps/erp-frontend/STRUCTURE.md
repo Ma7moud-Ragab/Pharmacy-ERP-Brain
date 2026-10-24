@@ -10,7 +10,9 @@ Note: Shared API contracts live at the repo root (`../../contracts/`) and are ac
 ```
 src/
 ├── main.tsx
-├── index.css                      Tailwind entry
+├── App.tsx                        RouterProvider + session initialize (useAuthStore)
+├── styles/
+│   └── main.css                   the Tailwind entry (Tailwind v4)
 │
 ├── routes/                        routing
 │   ├── router.tsx                 ALL routes are defined here
@@ -47,10 +49,14 @@ src/
 │       ├── tokenStorage.ts        the only file that touches browser storage
 │       └── permissions.ts         role to permission map
 │
-├── test/                          shared test harness, fixtures validation, and MSW
+├── test/                          shared tests + Phase 0 fixture conformance
 │   ├── contract-fixtures.test.ts  Phase 0 fixture conformance test (tests @contracts/fixtures)
-│   ├── renderWithProviders.tsx
-│   └── handlers.ts
+│   ├── authService.test.ts, authStore.test.ts
+│   └── routingGuards.test.tsx, permissions.test.ts
+│
+├── mocks/                         MSW for dev and tests
+│   ├── handlers.ts                the shared mock handlers
+│   └── browser.ts                 the dev worker started in main.tsx
 │
 ├── hooks/                         generic custom hooks, shared by several features
 │   ├── useAuth.ts
@@ -73,15 +79,17 @@ src/
 
 Create subfolders only when you have a file to put in them. No empty folders.
 
+Playwright E2E lives outside `src/`: `tests/e2e/` at the app root (`apps/erp-frontend/tests/e2e/`).
+
 ## 2. Where each kind of file goes
 
 | What                                                             | Where                                                                      |
 | ---------------------------------------------------------------- | -------------------------------------------------------------------------- |
 | A screen                                                         | `features/<feature>/pages/<Name>Page.tsx`                                  |
 | A component used by one feature                                  | `features/<feature>/components/`                                           |
-| A component used by several features                             | Do not create it. Ask the developer (see section 5)                        |
-| A generic building block                                         | `components/ui/` (design system owner only)                                |
-| An AI surface component                                          | `components/ai/` (AI owner only)                                           |
+| A component used by several features                             | A generic building block → `components/ui/` (follow `DESIGN.md`); otherwise ask the developer (see section 5) |
+| A generic building block                                         | `components/ui/` (design system — follow `DESIGN.md`, skill `design-system`) |
+| An AI surface component                                          | `components/ai/` (follow `DESIGN.md`, skill `design-system`)               |
 | A query or mutation hook and its query keys                      | `features/<feature>/hooks/`                                                |
 | A hook used by one feature only                                  | `features/<feature>/hooks/`                                                |
 | An API function                                                  | `features/<feature>/api/<feature>Api.ts`                                   |
@@ -95,11 +103,12 @@ Create subfolders only when you have a file to put in them. No empty folders.
 | A route, a protected route, a path constant                      | `routes/`                                                                  |
 | A layout                                                         | `layouts/`                                                                 |
 | A frontend-only type                                             | `types/ui.ts`, or next to the component that uses it                       |
-| Contracts & OpenAPI spec (read-only)                             | `../../contracts/` at repo root (accessed in app via `@contracts/*` alias) |
+| Contracts & OpenAPI spec (read-only; frontend slice = ask first) | `../../contracts/` at repo root (accessed in app via `@contracts/*` alias) |
 | Generated API domain types (read-only)                           | `types/generated/` (mirroring repo-root contracts/schemas)                 |
 | A component or hook unit test                                    | Next to the file it tests: `Name.test.tsx`                                 |
-| Shared test harness & mock handlers                              | `test/renderWithProviders.tsx`, `test/handlers.ts`                         |
-| A Playwright E2E test                                            | `tests/e2e/` at the repo root, outside the frontend app                    |
+| Shared test harness (custom render helper)                       | `src/test/renderWithProviders.tsx` — create it only when a test first needs it |
+| Shared mock handlers (MSW)                              | `src/mocks/handlers.ts`, `src/mocks/browser.ts`                         |
+| A Playwright E2E test                                            | `tests/e2e/` inside the frontend app: `apps/erp-frontend/tests/e2e/`        |
 
 **Hooks:** a hook used by one feature stays inside that feature's `hooks/` folder. `hooks/` at the top level is only for generic hooks shared by several features (`useAuth`, `useDebounce`, `useMediaQuery`...). Hooks in `hooks/` never call the API and never hold server data.
 
@@ -107,17 +116,14 @@ Each AI page lives in `features/ai/pages/`. The routes are plain react-router ro
 
 ## 3. Ownership map
 
-| Folder                                                 | Owner                                                               |
-| ------------------------------------------------------ | ------------------------------------------------------------------- |
-| `routes/`, `layouts/`, `lib/`, `hooks/`, `stores/`     | Omar                                                                |
-| `features/sales/`, `features/purchasing/`              | Omar                                                                |
-| `tests/e2e/` at the repo root (suite, config, helpers) | Omar                                                                |
-| `features/products/`, `features/inventory/`            | Maged                                                               |
-| `components/ui/`, `components/ai/`, `features/ai/`     | Mahmoud                                                             |
-| `features/auth/` (login page)                          | Ahmed Salah                                                         |
-| `features/customers/`                                  | **EXCLUDED FROM MVP** (Walk-in Cashier sales only; no customer CRM) |
-| `../../contracts/` (repo root)                         | Shared Monorepo Contracts (Read-only System of Record, multi-team)  |
-| `types/generated/`                                     | Mirrors repo-root contracts/schemas (read-only)                     |
+The frontend team owns `apps/erp-frontend/` as ONE unit — any member may edit any folder below (skill `ownership`). Only these entries are special:
+
+| Folder / path                         | Rule                                                                 |
+| ------------------------------------- | -------------------------------------------------------------------- |
+| Everything under `apps/erp-frontend/` | Frontend team — editable, following the skills                       |
+| `features/customers/`                 | **EXCLUDED FROM MVP** (Walk-in Cashier sales only; no customer CRM)  |
+| `types/generated/`                    | Read-only: mirrors repo-root `contracts/schemas` — never edited by hand |
+| `../../contracts/` (repo root)        | Outside the app: read-only System of Record (multi-team). The frontend-owned slice needs ask-first (router Scope rule) |
 
 ## 4. Naming
 
@@ -146,10 +152,10 @@ A folder may import only from the folders listed next to it. No circular imports
 | `features/<x>`  | `components/ui`, `components/ai`, `hooks`, `lib`, `stores`, `types`. **Never** from another feature, except the exception below |
 | `components/ui` | `types`, `lib` (helpers only). **Never** from `features`, `components/ai`, or `stores`                                          |
 | `components/ai` | `components/ui`, `types`                                                                                                        |
-| `lib`           | `types`, `stores` (for `client.ts` reading token via `useAuthStore.getState()`)                                                 |
-| `stores`        | `types` only                                                                                                                    |
+| `lib`           | `types`                                                 |
+| `stores`        | `types`, `lib`, `features/auth/api` (auth session actions — documented exception)                                                                                                                    |
 | `hooks`         | `lib`, `stores`, `types`. **Never** from `features` or `components`                                                             |
-| `routes`        | `features/*/pages`, `layouts`, `hooks`, `lib/auth`                                                                              |
+| `routes`        | `features/*/pages`, `layouts`, `hooks`, `lib/auth`, `stores`                                                                              |
 | `layouts`       | `components`, `hooks`, `lib/auth`                                                                                               |
 | `types`         | Nothing                                                                                                                         |
 
@@ -158,7 +164,7 @@ A feature may import from another feature ONLY through that feature's public bar
 
 - Allowed: read-only query hooks (`useQuery` based) and types.
 - Forbidden: mutation hooks, API functions, stores, components, pages, and deep imports such as `features/products/hooks/...`. Always import from the barrel (`features/products`).
-- The barrel belongs to the owner of the exporting feature. The importing feature never edits another feature's barrel or files. If a hook you need is not exported, tell the developer so he can ask the owner to export it.
+- The barrel is the exporting feature's public interface. The importing feature only reads it — never edit another feature's files just to export something. If a hook you need is not exported through the barrel, ask the developer.
 
 | Importing feature | May import from |
 | ----------------- | --------------- |

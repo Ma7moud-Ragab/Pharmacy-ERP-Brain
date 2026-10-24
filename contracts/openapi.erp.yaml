@@ -1,20 +1,23 @@
 # =============================================================================
-# Pharmacy ERP — Master OpenAPI Contract (Frontend ↔ Backend)
+# Pharmacy ERP — ERP Frontend/POS OpenAPI Contract
 # Owner: erp-frontend
 # =============================================================================
 # Derived from: ERP-Backend-Blueprint-v1.1.md (backend team spec)
 #
 # Audience: Frontend team (POS web client, admin/back-office web client).
-# Canonical /api/v1/canonical/* endpoints are NOT in this contract — they are
-# the external Brain/AI boundary owned by the backend integration module,
-# not a frontend surface.
+# Scope: this file is the ERP Frontend/POS HTTP surface only. Canonical
+# /api/v1/canonical/* and internal /api/v1/sync/* endpoints are out of scope;
+# they belong to the external Brain/AI and branch-replication boundaries and
+# are specified separately. This file is not the complete ERP master contract.
 #
 # Conventions (binding):
 #  - All routes versioned under /api/v1
-#  - All mutations require header: Idempotency-Key
-#  - All reads use W3C traceparent propagation
+#  - All mutations require header: Idempotency-Key, except login and
+#    refresh-token rotation (Blueprint 8.9.2)
+#  - Reads accept the standard W3C traceparent header; it is transport
+#    metadata and is intentionally not modeled as a per-operation parameter
 #  - Errors use the single ApiError envelope; each code maps to exactly one
-#    HTTP status (400/401/403/404/409/422/500)
+#    HTTP status (400/401/403/404/409/410/422/500)
 #  - Tenant (organization_id) ALWAYS derives from the JWT, never a request body
 #    or query field. Any client-supplied organization_id is ignored by the server.
 #  - Server is authoritative for: prices, tax rates, totals, change due,
@@ -28,12 +31,17 @@
 # =============================================================================
 openapi: 3.0.3
 info:
-  title: Pharmacy ERP API — Frontend Contract
+  title: Pharmacy ERP API — ERP Frontend/POS Contract
   version: "1.0.0"
   description: |
-    Frontend-facing contract for the Pharmacy ERP backend MVP.
+    Frontend/POS-facing contract for the Pharmacy ERP backend MVP.
 
-    Two runtime modes deploy this same API surface:
+    Contract perimeter: this document covers only the ERP Frontend/POS HTTP
+    surface. Canonical `/api/v1/canonical/*` and internal `/api/v1/sync/*`
+    endpoints are deliberately excluded and are specified separately; they are
+    not missing routes from this contract.
+
+    Two runtime modes deploy this API surface:
       - ERP_RUNTIME_MODE=Cloud      — consolidation API
       - ERP_RUNTIME_MODE=BranchLocal — branch POS API (offline-capable)
 
@@ -134,16 +142,21 @@ paths:
       summary: Revoke current refresh-token family
       security:
         - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/idempotencyKey"
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/LogoutRequest" }
       responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
         "204": { description: Family revoked }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
+      x-required-roles: [Admin, Pharmacist, Cashier]
+      x-required-scopes: []
       x-runtime: Both
       x-stage: 1
 
@@ -155,6 +168,7 @@ paths:
       security:
         - bearerAuth: []
       responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Current user + organization + branch scope
           content:
@@ -163,6 +177,8 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
+      x-required-roles: [Admin, Pharmacist, Cashier]
+      x-required-scopes: []
       x-runtime: Both
       x-stage: 1
 
@@ -175,6 +191,12 @@ paths:
         JSON Web Key Set of RS256 public signing keys (kid-keyed). Served at
         the API host root, outside the /api/v1 base path. The FE validates
         access tokens against these keys locally.
+      servers:
+        - url: https://{host}
+          variables:
+            host:
+              default: erp.example.com
+              description: Cloud or branch-local API host (root, without /api/v1)
       security: []
       x-runtime: Both
       x-stage: 1
@@ -202,12 +224,16 @@ paths:
         one QUARANTINE, one SCRAP location for the branch.
       security:
         - platformProvisioner: []
+      parameters:
+        - $ref: "#/components/parameters/idempotencyKey"
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/CreateOrganizationRequest" }
       responses:
+        "409": { $ref: "#/components/responses/Conflict" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "201":
           description: Created organization + initial admin context + enrollment setup state
           content:
@@ -217,6 +243,8 @@ paths:
         "422": { $ref: "#/components/responses/ValidationError" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
+      x-required-roles: [PlatformProvisioner]
+      x-required-scopes: []
       x-runtime: Cloud
       x-stage: 1
 
@@ -235,6 +263,7 @@ paths:
         - $ref: "#/components/parameters/limit"
         - $ref: "#/components/parameters/includeInactive"
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "200":
           description: Paged branches
           content:
@@ -244,6 +273,8 @@ paths:
         "403": { $ref: "#/components/responses/ForbiddenBranch" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
+      x-required-roles: [Admin]
+      x-required-scopes: []
       x-runtime: Both
       x-stage: 1
     post:
@@ -260,6 +291,7 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/BranchRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "201":
           description: Created branch (locations are auto-seeded)
           content:
@@ -270,7 +302,9 @@ paths:
         "422": { $ref: "#/components/responses/ValidationError" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
-      x-runtime: Both
+      x-required-roles: [Admin]
+      x-required-scopes: []
+      x-runtime: Cloud
       x-stage: 1
 
   /branches/{branchId}:
@@ -283,6 +317,8 @@ paths:
       security:
         - bearerAuth: []
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Branch detail
           content:
@@ -291,6 +327,8 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
+      x-required-roles: [Admin]
+      x-required-scopes: []
       x-runtime: Both
       x-stage: 1
     patch:
@@ -307,6 +345,7 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/BranchPatchRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "200":
           description: Updated branch
           content:
@@ -316,7 +355,9 @@ paths:
         "422": { $ref: "#/components/responses/ValidationError" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
-      x-runtime: Both
+      x-required-roles: [Admin]
+      x-required-scopes: []
+      x-runtime: Cloud
       x-stage: 1
 
   /branches/{branchId}/enrollment-tokens:
@@ -330,6 +371,7 @@ paths:
         - $ref: "#/components/parameters/branchId"
         - $ref: "#/components/parameters/idempotencyKey"
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "201":
           description: Enrollment token (single use, expiring)
           content:
@@ -338,7 +380,9 @@ paths:
         "403": { $ref: "#/components/responses/ForbiddenBranch" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
-      x-runtime: Both
+      x-required-roles: [Admin]
+      x-required-scopes: []
+      x-runtime: Cloud
       x-stage: 1
 
   /branch-enrollment:
@@ -349,9 +393,15 @@ paths:
       description: |
         Redeems a single-use token; returns organization_id, branch_id,
         runtime credential, initial sync cursor, and credential expiry.
-        Runs on the branch-local API (x-runtime BranchLocal).
+        Served by Cloud because enrollment tokens are stored hashed in the
+        cloud identity store; the branch runtime calls this cloud endpoint
+        over the authenticated bootstrap channel.
       security: []
-      x-runtime: BranchLocal
+      x-required-roles: []
+      x-required-scopes: []
+      x-runtime: Cloud
+      parameters:
+        - $ref: "#/components/parameters/idempotencyKey"
       requestBody:
         required: true
         content:
@@ -364,7 +414,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/BranchEnrollmentResultDto" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "410": { description: Token expired or already used }
+        "410": { $ref: "#/components/responses/Gone" }
         "422": { $ref: "#/components/responses/ValidationError" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
@@ -384,6 +434,7 @@ paths:
         - $ref: "#/components/parameters/cursor"
         - $ref: "#/components/parameters/limit"
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "200":
           description: Paged users
           content:
@@ -392,6 +443,8 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
+      x-required-roles: [Admin]
+      x-required-scopes: [user:admin]
       x-runtime: Both
       x-stage: 1
     post:
@@ -408,6 +461,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/CreateUserRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "201":
           description: Created user
           content:
@@ -417,7 +472,9 @@ paths:
         "409": { $ref: "#/components/responses/Conflict" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
-      x-runtime: Both
+      x-required-roles: [Admin]
+      x-required-scopes: [user:admin]
+      x-runtime: Cloud
       x-stage: 1
 
   /users/{userId}:
@@ -430,6 +487,8 @@ paths:
       security:
         - bearerAuth: []
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: User detail
           content:
@@ -438,6 +497,8 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
+      x-required-roles: [Admin]
+      x-required-scopes: [user:admin]
       x-runtime: Both
       x-stage: 1
     patch:
@@ -454,6 +515,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/UserPatchRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Updated user
           content:
@@ -462,7 +525,9 @@ paths:
         "422": { $ref: "#/components/responses/ValidationError" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
-      x-runtime: Both
+      x-required-roles: [Admin]
+      x-required-scopes: [user:admin]
+      x-runtime: Cloud
       x-stage: 1
 
   /users/{userId}/password-reset:
@@ -481,12 +546,15 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/PasswordResetRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "204": { description: Password reset }
         "422": { $ref: "#/components/responses/ValidationError" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
-      x-runtime: Both
+      x-required-roles: [Admin]
+      x-required-scopes: [user:admin]
+      x-runtime: Cloud
       x-stage: 1
 
   /users/{userId}/revoke-sessions:
@@ -500,11 +568,15 @@ paths:
         - $ref: "#/components/parameters/userId"
         - $ref: "#/components/parameters/idempotencyKey"
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "204": { description: Sessions revoked }
         "404": { $ref: "#/components/responses/NotFound" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
-      x-runtime: Both
+      x-required-roles: [Admin]
+      x-required-scopes: [user:admin]
+      x-runtime: Cloud
       x-stage: 1
 
   # ===========================================================================
@@ -522,6 +594,8 @@ paths:
         - $ref: "#/components/parameters/limit"
         - $ref: "#/components/parameters/branchIdQuery"
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Paged employees
           content:
@@ -529,6 +603,8 @@ paths:
               schema: { $ref: "#/components/schemas/PagedEmployeeDto" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
+      x-required-roles: [Admin]
+      x-required-scopes: [user:admin]
       x-runtime: Both
       x-stage: 1
     post:
@@ -545,6 +621,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/EmployeeRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "201":
           description: Created employee
           content:
@@ -553,7 +631,9 @@ paths:
         "422": { $ref: "#/components/responses/ValidationError" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
-      x-runtime: Both
+      x-required-roles: [Admin]
+      x-required-scopes: [user:admin]
+      x-runtime: Cloud
       x-stage: 1
 
   /employees/{employeeId}:
@@ -566,6 +646,8 @@ paths:
       security:
         - bearerAuth: []
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Employee detail
           content:
@@ -574,6 +656,8 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
+      x-required-roles: [Admin]
+      x-required-scopes: [user:admin]
       x-runtime: Both
       x-stage: 1
     patch:
@@ -590,6 +674,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/EmployeePatchRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Updated employee
           content:
@@ -598,7 +684,9 @@ paths:
         "422": { $ref: "#/components/responses/ValidationError" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
-      x-runtime: Both
+      x-required-roles: [Admin]
+      x-required-scopes: [user:admin]
+      x-runtime: Cloud
       x-stage: 1
 
   # ===========================================================================
@@ -616,6 +704,8 @@ paths:
         - $ref: "#/components/parameters/limit"
         - $ref: "#/components/parameters/includeInactive"
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Paged categories (tree via parent_category_id)
           content:
@@ -623,6 +713,8 @@ paths:
               schema: { $ref: "#/components/schemas/PagedProductCategoryDto" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
+      x-required-roles: [Admin, Pharmacist, Cashier]
+      x-required-scopes: [inventory:read]
       x-runtime: Both
       x-stage: 1
     post:
@@ -639,6 +731,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/ProductCategoryRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "201":
           description: Created category
           content:
@@ -648,7 +742,9 @@ paths:
         "422": { $ref: "#/components/responses/ValidationError" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
-      x-runtime: Both
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [inventory:write]
+      x-runtime: Cloud
       x-stage: 1
 
   /product-categories/{categoryId}:
@@ -661,6 +757,8 @@ paths:
       security:
         - bearerAuth: []
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Category detail
           content:
@@ -669,6 +767,8 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
+      x-required-roles: [Admin, Pharmacist, Cashier]
+      x-required-scopes: [inventory:read]
       x-runtime: Both
       x-stage: 1
     patch:
@@ -685,6 +785,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/ProductCategoryPatchRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Updated category
           content:
@@ -693,7 +795,9 @@ paths:
         "422": { $ref: "#/components/responses/ValidationError" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
-      x-runtime: Both
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [inventory:write]
+      x-runtime: Cloud
       x-stage: 1
 
   # ===========================================================================
@@ -718,6 +822,8 @@ paths:
           schema: { type: string, format: uuid }
         - $ref: "#/components/parameters/includeInactive"
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Paged products
           content:
@@ -725,6 +831,8 @@ paths:
               schema: { $ref: "#/components/schemas/PagedProductDto" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
+      x-required-roles: [Admin, Pharmacist, Cashier]
+      x-required-scopes: [inventory:read]
       x-runtime: Both
       x-stage: 1
     post:
@@ -741,6 +849,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/CreateProductRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "201":
           description: Created product (with initial base UOM)
           content:
@@ -750,7 +860,9 @@ paths:
         "422": { $ref: "#/components/responses/ValidationError" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
-      x-runtime: Both
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [inventory:write]
+      x-runtime: Cloud
       x-stage: 1
 
   /products/{productId}:
@@ -763,6 +875,8 @@ paths:
       security:
         - bearerAuth: []
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Product detail incl. UOMs
           content:
@@ -771,6 +885,8 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
+      x-required-roles: [Admin, Pharmacist, Cashier]
+      x-required-scopes: [inventory:read]
       x-runtime: Both
       x-stage: 1
     patch:
@@ -787,6 +903,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/ProductPatchRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Updated product
           content:
@@ -795,7 +913,9 @@ paths:
         "422": { $ref: "#/components/responses/ValidationError" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
-      x-runtime: Both
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [inventory:write]
+      x-runtime: Cloud
       x-stage: 1
 
   /products/{productId}/uoms:
@@ -808,6 +928,8 @@ paths:
       security:
         - bearerAuth: []
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: UOM list for product (incl. inactive)
           content:
@@ -817,6 +939,8 @@ paths:
                 items: { $ref: "#/components/schemas/ProductUomDto" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
+      x-required-roles: [Admin, Pharmacist, Cashier]
+      x-required-scopes: [inventory:read]
       x-runtime: Both
       x-stage: 1
     post:
@@ -833,6 +957,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/ProductUomRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "201":
           description: Created UOM
           content:
@@ -842,7 +968,9 @@ paths:
         "422": { $ref: "#/components/responses/ValidationError" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
-      x-runtime: Both
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [inventory:write]
+      x-runtime: Cloud
       x-stage: 1
 
   /products/{productId}/uoms/{uomId}:
@@ -867,6 +995,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/ProductUomPatchRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Updated UOM
           content:
@@ -876,7 +1006,9 @@ paths:
         "422": { $ref: "#/components/responses/ValidationError" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
-      x-runtime: Both
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [inventory:write]
+      x-runtime: Cloud
       x-stage: 1
 
   /branches/{branchId}/products/{productId}/reorder-rule:
@@ -890,6 +1022,8 @@ paths:
       security:
         - bearerAuth: []
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Reorder rule (or null if none configured)
           content:
@@ -902,6 +1036,8 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [inventory:read]
       x-runtime: Both
       x-stage: 1
     put:
@@ -918,6 +1054,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/ReorderRuleRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Upserted rule
           content:
@@ -926,7 +1064,9 @@ paths:
         "422": { $ref: "#/components/responses/ValidationError" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
-      x-runtime: Both
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [inventory:write]
+      x-runtime: Cloud
       x-stage: 1
 
   # ===========================================================================
@@ -948,6 +1088,8 @@ paths:
           schema: { $ref: "#/components/schemas/LocationType" }
         - $ref: "#/components/parameters/includeInactive"
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Paged locations. Branches are seeded with SELLABLE / QUARANTINE / SCRAP defaults.
           content:
@@ -955,6 +1097,8 @@ paths:
               schema: { $ref: "#/components/schemas/PagedInventoryLocationDto" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
+      x-required-roles: [Admin, Pharmacist, Cashier]
+      x-required-scopes: [inventory:read]
       x-runtime: Both
       x-stage: 1
     post:
@@ -971,6 +1115,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/InventoryLocationRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "201":
           description: Created location
           content:
@@ -979,6 +1125,8 @@ paths:
         "422": { $ref: "#/components/responses/ValidationError" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [inventory:write]
       x-runtime: Both
       x-stage: 1
 
@@ -992,6 +1140,8 @@ paths:
       security:
         - bearerAuth: []
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Location detail
           content:
@@ -1000,6 +1150,8 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
+      x-required-roles: [Admin, Pharmacist, Cashier]
+      x-required-scopes: [inventory:read]
       x-runtime: Both
       x-stage: 1
     patch:
@@ -1016,6 +1168,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/InventoryLocationPatchRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Updated location
           content:
@@ -1024,6 +1178,8 @@ paths:
         "422": { $ref: "#/components/responses/ValidationError" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [inventory:write]
       x-runtime: Both
       x-stage: 1
 
@@ -1045,6 +1201,8 @@ paths:
           in: query
           schema: { $ref: "#/components/schemas/BatchQualityStatus" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Paged batches
           content:
@@ -1052,6 +1210,8 @@ paths:
               schema: { $ref: "#/components/schemas/PagedInventoryBatchDto" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
+      x-required-roles: [Admin, Pharmacist, Cashier]
+      x-required-scopes: [inventory:read]
       x-runtime: Both
       x-stage: 1
 
@@ -1076,6 +1236,8 @@ paths:
           in: query
           schema: { type: string, format: uuid }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Paged balances (no reserved quantity in MVP)
           content:
@@ -1083,6 +1245,8 @@ paths:
               schema: { $ref: "#/components/schemas/PagedInventoryBalanceDto" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
+      x-required-roles: [Admin, Pharmacist, Cashier]
+      x-required-scopes: [inventory:read]
       x-runtime: Both
       x-stage: 1
 
@@ -1110,6 +1274,8 @@ paths:
           in: query
           schema: { type: string, format: date-time }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Paged ledger transactions
           content:
@@ -1117,6 +1283,8 @@ paths:
               schema: { $ref: "#/components/schemas/PagedInventoryTxnDto" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [inventory:read]
       x-runtime: Both
       x-stage: 1
 
@@ -1130,6 +1298,8 @@ paths:
       parameters:
         - $ref: "#/components/parameters/txnId"
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Transaction + lines
           content:
@@ -1138,6 +1308,8 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [inventory:read]
       x-runtime: Both
       x-stage: 1
 
@@ -1146,10 +1318,12 @@ paths:
       tags: [Inventory]
       operationId: postInventoryAdjustment
       summary: |
-        Posting-only command: OPENING_BALANCE or authorized stock correction
-        (ADJUSTMENT_IN / ADJUSTMENT_OUT). Branch-local; requires counted
-        quantity, batch (or NON-LOT), location, and authorized unit-cost.
-        DRAFT editing allowed; POSTED rows immutable; corrections use REVERSAL.
+        Posting-only command: OPENING_BALANCE, authorized stock correction
+        (ADJUSTMENT_IN / ADJUSTMENT_OUT), or REVERSAL of a POSTED transaction.
+        Branch-local; requires counted quantity, batch (or NON-LOT), location,
+        and authorized unit-cost (as applicable). DRAFT editing is allowed via
+        PATCH; POSTED rows are immutable, so corrections/reversals are new
+        transactions posted through this same endpoint.
       security:
         - bearerAuth: []
       parameters:
@@ -1160,6 +1334,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/InventoryTxnRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "201":
           description: Posted or draft adjustment
           content:
@@ -1169,7 +1345,9 @@ paths:
         "422": { $ref: "#/components/responses/ValidationError" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
-      x-runtime: Both
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [inventory:write]
+      x-runtime: BranchLocal
       x-stage: 1
 
   /inventory/adjustments/{txnId}:
@@ -1187,8 +1365,10 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/InventoryTxnRequest" }
+            schema: { $ref: "#/components/schemas/InventoryTxnPatchRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Updated draft
           content:
@@ -1198,25 +1378,26 @@ paths:
         "422": { $ref: "#/components/responses/ValidationError" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
-      x-runtime: Both
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [inventory:write]
+      x-runtime: BranchLocal
       x-stage: 1
     post:
       tags: [Inventory]
-      operationId: postOrReverseInventoryAdjustment
-      summary: Post a DRAFT adjustment (X-ERP-Action=POST) or post a REVERSAL of this transaction (X-ERP-Action=REVERSE)
+      operationId: postInventoryAdjustmentById
+      summary: Post a DRAFT adjustment; use POST /inventory/adjustments for reversals
+      description: |
+        Commits this DRAFT adjustment. Posted transactions and lines are
+        immutable; corrections and reversals are new transactions created via
+        POST /inventory/adjustments with transaction_type=REVERSAL and
+        reverses_inventory_txn_id.
       security:
         - bearerAuth: []
       parameters:
-        - $ref: "#/components/parameters/txnId"
         - $ref: "#/components/parameters/idempotencyKey"
-        - name: X-ERP-Action
-          in: header
-          required: false
-          description: "POST (default) commits a DRAFT; REVERSE posts a reversal of this POSTED transaction as a new linked txn."
-          schema:
-            type: string
-            enum: [POST, REVERSE]
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "201":
           description: Posted transaction
           content:
@@ -1226,7 +1407,9 @@ paths:
         "422": { $ref: "#/components/responses/ValidationError" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
-      x-runtime: Both
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [inventory:write]
+      x-runtime: BranchLocal
       x-stage: 1
 
   /inventory/adjustments/{txnId}/cancel:
@@ -1240,11 +1423,15 @@ paths:
         - $ref: "#/components/parameters/txnId"
         - $ref: "#/components/parameters/idempotencyKey"
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "204": { description: Draft cancelled }
         "409": { $ref: "#/components/responses/Conflict" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
-      x-runtime: Both
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [inventory:write]
+      x-runtime: BranchLocal
       x-stage: 1
 
   # ===========================================================================
@@ -1255,6 +1442,8 @@ paths:
       tags: [Sales]
       operationId: createSalesOrder
       summary: Create cashier DRAFT order (does NOT reserve stock)
+      x-required-roles: [Admin, Cashier]
+      x-required-scopes: [sales:write]
       x-runtime: BranchLocal
       x-stage: 2
       security:
@@ -1267,6 +1456,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/CreateSalesOrderRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "201":
           description: Draft order with server-priced lines
           content:
@@ -1280,6 +1471,8 @@ paths:
       tags: [Sales]
       operationId: listSalesOrders
       summary: List sales orders (branch-scoped)
+      x-required-roles: [Admin, Pharmacist, Cashier]
+      x-required-scopes: [sales:read]
       x-runtime: BranchLocal
       x-stage: 2
       security:
@@ -1298,6 +1491,8 @@ paths:
         - $ref: "#/components/parameters/cursor"
         - $ref: "#/components/parameters/limit"
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Paged orders
           content:
@@ -1311,6 +1506,8 @@ paths:
       tags: [Sales]
       operationId: getSalesOrder
       summary: Get sales order detail
+      x-required-roles: [Admin, Pharmacist, Cashier]
+      x-required-scopes: [sales:read]
       x-runtime: BranchLocal
       x-stage: 2
       security:
@@ -1318,6 +1515,8 @@ paths:
       parameters:
         - $ref: "#/components/parameters/salesOrderId"
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Order + lines
           content:
@@ -1332,6 +1531,8 @@ paths:
       tags: [Sales]
       operationId: putSalesOrderLines
       summary: Replace draft line set (DRAFT only)
+      x-required-roles: [Admin, Cashier]
+      x-required-scopes: [sales:write]
       x-runtime: BranchLocal
       x-stage: 2
       security:
@@ -1345,6 +1546,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/SalesOrderLinesRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Updated draft order (server re-prices lines)
           content:
@@ -1363,6 +1566,8 @@ paths:
         Atomic: invoice + cash payment + FEFO stock issue + audit + sync outbox.
         Full cash payment only in MVP. Server computes totals from line
         snapshots. FE re-sends only cash_tendered + method.
+      x-required-roles: [Admin, Cashier]
+      x-required-scopes: [sales:write]
       x-runtime: BranchLocal
       x-stage: 2
       security:
@@ -1376,6 +1581,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/CompleteSalesOrderRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "201":
           description: Completed order + invoice + payment + inventory txn refs
           content:
@@ -1395,6 +1602,8 @@ paths:
       tags: [Sales]
       operationId: cancelSalesOrder
       summary: Cancel DRAFT; no stock reversal needed
+      x-required-roles: [Admin, Cashier]
+      x-required-scopes: [sales:write]
       x-runtime: BranchLocal
       x-stage: 2
       security:
@@ -1403,6 +1612,8 @@ paths:
         - $ref: "#/components/parameters/salesOrderId"
         - $ref: "#/components/parameters/idempotencyKey"
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "204": { description: Draft cancelled }
         "409": { $ref: "#/components/responses/Conflict" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
@@ -1416,6 +1627,8 @@ paths:
       tags: [Sales]
       operationId: listSalesInvoices
       summary: List sales invoices (branch-scoped)
+      x-required-roles: [Admin, Pharmacist, Cashier]
+      x-required-scopes: [sales:read]
       x-runtime: BranchLocal
       x-stage: 2
       security:
@@ -1434,6 +1647,8 @@ paths:
         - $ref: "#/components/parameters/cursor"
         - $ref: "#/components/parameters/limit"
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Paged invoices
           content:
@@ -1447,6 +1662,8 @@ paths:
       tags: [Sales]
       operationId: getSalesInvoice
       summary: Invoice lines with immutable snapshots + settlement projection
+      x-required-roles: [Admin, Pharmacist, Cashier]
+      x-required-scopes: [sales:read]
       x-runtime: BranchLocal
       x-stage: 2
       security:
@@ -1454,6 +1671,8 @@ paths:
       parameters:
         - $ref: "#/components/parameters/invoiceId"
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Invoice detail
           content:
@@ -1476,6 +1695,8 @@ paths:
         14-day window; quantity capped by remaining sold allocation. FE does
         NOT choose batch/location — the server derives them from the posted
         SALE_ISSUE ledger lines. Disposition RESTOCK / QUARANTINE / SCRAP.
+      x-required-roles: [Admin, Pharmacist, Cashier]
+      x-required-scopes: [return:write]
       x-runtime: BranchLocal
       x-stage: 2
       security:
@@ -1488,6 +1709,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/SalesReturnRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "201":
           description: Posted return (may include refund + stock txn)
           content:
@@ -1505,6 +1728,8 @@ paths:
       tags: [Sales]
       operationId: listSalesReturns
       summary: List sales returns (branch-scoped)
+      x-required-roles: [Admin, Pharmacist, Cashier]
+      x-required-scopes: [return:read]
       x-runtime: BranchLocal
       x-stage: 2
       security:
@@ -1523,6 +1748,8 @@ paths:
         - $ref: "#/components/parameters/cursor"
         - $ref: "#/components/parameters/limit"
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Paged returns
           content:
@@ -1536,6 +1763,8 @@ paths:
       tags: [Sales]
       operationId: getSalesReturn
       summary: Get sales return detail
+      x-required-roles: [Admin, Pharmacist, Cashier]
+      x-required-scopes: [return:read]
       x-runtime: BranchLocal
       x-stage: 2
       security:
@@ -1543,6 +1772,8 @@ paths:
       parameters:
         - $ref: "#/components/parameters/returnId"
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Return + lines + stock txn + refund
           content:
@@ -1560,6 +1791,8 @@ paths:
       tags: [Purchasing]
       operationId: listSuppliers
       summary: List suppliers
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [purchase-order:read]
       x-runtime: Cloud
       x-stage: 3
       security:
@@ -1569,6 +1802,8 @@ paths:
         - $ref: "#/components/parameters/limit"
         - $ref: "#/components/parameters/includeInactive"
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Paged suppliers
           content:
@@ -1580,6 +1815,8 @@ paths:
       tags: [Purchasing]
       operationId: createSupplier
       summary: Create supplier
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [purchase-order:draft]
       x-runtime: Cloud
       x-stage: 3
       security:
@@ -1592,6 +1829,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/CreateSupplierRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "201":
           description: Created supplier
           content:
@@ -1609,11 +1848,15 @@ paths:
       tags: [Purchasing]
       operationId: getSupplier
       summary: Get supplier detail
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [purchase-order:read]
       x-runtime: Cloud
       x-stage: 3
       security:
         - bearerAuth: []
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Supplier detail
           content:
@@ -1626,6 +1869,8 @@ paths:
       tags: [Purchasing]
       operationId: patchSupplier
       summary: Update supplier
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [purchase-order:draft]
       x-runtime: Cloud
       x-stage: 3
       security:
@@ -1638,6 +1883,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/SupplierPatchRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Updated supplier
           content:
@@ -1652,6 +1899,8 @@ paths:
       tags: [Purchasing]
       operationId: patchSupplierStatus
       summary: Soft deactivate / reactivate supplier
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [purchase-order:draft]
       x-runtime: Cloud
       x-stage: 3
       security:
@@ -1665,6 +1914,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/SupplierStatusPatchRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Updated supplier
           content:
@@ -1685,6 +1936,8 @@ paths:
         Create DRAFT PO. Server computes subtotal / tax_total / additional_cost
         allocation to lines pro-rata ordered line net; normalizes to base UOM;
         snapshots prices. Currency must equal Organization base_currency.
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [purchase-order:draft]
       x-runtime: Cloud
       x-stage: 3
       security:
@@ -1697,6 +1950,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/CreatePurchaseOrderRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "201":
           description: Draft PO with per-line allocations
           content:
@@ -1710,7 +1965,9 @@ paths:
       tags: [Purchasing]
       operationId: listPurchaseOrders
       summary: List purchase orders (branch-scoped)
-      x-runtime: Cloud
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [purchase-order:read]
+      x-runtime: Both
       x-stage: 3
       security:
         - bearerAuth: []
@@ -1731,6 +1988,8 @@ paths:
         - $ref: "#/components/parameters/cursor"
         - $ref: "#/components/parameters/limit"
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Paged POs
           content:
@@ -1746,11 +2005,15 @@ paths:
       tags: [Purchasing]
       operationId: getPurchaseOrder
       summary: Get purchase order detail
-      x-runtime: Cloud
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [purchase-order:read]
+      x-runtime: Both
       x-stage: 3
       security:
         - bearerAuth: []
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: PO detail + lines + totals + payments summary
           content:
@@ -1763,6 +2026,8 @@ paths:
       tags: [Purchasing]
       operationId: patchPurchaseOrder
       summary: DRAFT-only edit (409 after approval/order)
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [purchase-order:draft]
       x-runtime: Cloud
       x-stage: 3
       security:
@@ -1775,6 +2040,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/PurchaseOrderPatchRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Updated draft PO
           content:
@@ -1784,12 +2051,18 @@ paths:
         "422": { $ref: "#/components/responses/ValidationError" }
         "400": { $ref: "#/components/responses/MalformedRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
+
+  /purchase-orders/{purchaseOrderId}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/purchaseOrderId"
     post:
       tags: [Purchasing]
       operationId: cancelPurchaseOrder
       summary: |
         DRAFT/APPROVED pre-order cancel with reason, only when paid_amount=0.
         After ORDERED, remaining-quantity cancellation must use /cancel-remaining.
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [purchase-order:draft]
       x-runtime: Cloud
       x-stage: 3
       security:
@@ -1802,6 +2075,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/CancelPurchaseOrderRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Cancelled PO (CANCELLED or remaining-cancelled transition)
           content:
@@ -1817,6 +2092,8 @@ paths:
       tags: [Purchasing]
       operationId: approvePurchaseOrder
       summary: DRAFT → APPROVED
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [purchase-order:approve]
       x-runtime: Cloud
       x-stage: 3
       security:
@@ -1825,6 +2102,8 @@ paths:
         - $ref: "#/components/parameters/purchaseOrderId"
         - $ref: "#/components/parameters/idempotencyKey"
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Approved PO
           content:
@@ -1839,6 +2118,8 @@ paths:
       tags: [Purchasing]
       operationId: orderPurchaseOrder
       summary: APPROVED → ORDERED (ordered quantities and terms become immutable)
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [purchase-order:approve]
       x-runtime: Cloud
       x-stage: 3
       security:
@@ -1852,6 +2133,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/OrderPurchaseOrderRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Ordered PO
           content:
@@ -1872,6 +2155,8 @@ paths:
         all atomically. Idempotent; same key cannot post twice.
         Expired lots rejected for sellable; shelf-life policy enforced,
         exception role-guarded with reason.
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [purchase-order:receive]
       x-runtime: BranchLocal
       x-stage: 3
       security:
@@ -1885,6 +2170,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/ReceivePurchaseOrderRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "201":
           description: Receipt result + inventory txn refs
           content:
@@ -1907,6 +2194,8 @@ paths:
         BranchLocal-only close of remaining obligation (reason + key); PO
         transitions to CLOSED when no uncancelled quantity remains; emits
         CANCEL_REMAINING_PURCHASE_ORDER fact to cloud.
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [purchase-order:receive]
       x-runtime: BranchLocal
       x-stage: 3
       security:
@@ -1920,6 +2209,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/CancelPurchaseOrderRemainingRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: CLOSED PO
           content:
@@ -1942,6 +2233,8 @@ paths:
         supplier-invoice match. Only for APPROVED/ORDERED/PARTIALLY_RECEIVED/
         RECEIVED/CLOSED POs with positive outstanding; amount ≤ outstanding;
         currency must match PO (which equals base_currency).
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [supplier-payment:write]
       x-runtime: Cloud
       x-stage: 3
       security:
@@ -1954,6 +2247,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/RecordSupplierPaymentRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "201":
           description: Posted payment + updated PO payment status
           content:
@@ -1969,6 +2264,8 @@ paths:
       tags: [Purchasing]
       operationId: getSupplierPayment
       summary: Get supplier payment detail
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [purchase-order:read]
       x-runtime: Cloud
       x-stage: 3
       security:
@@ -1976,6 +2273,8 @@ paths:
       parameters:
         - $ref: "#/components/parameters/supplierPaymentId"
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Payment detail
           content:
@@ -1993,7 +2292,9 @@ paths:
       tags: [Purchasing]
       operationId: listVendorReturns
       summary: List vendor returns (branch-scoped)
-      x-runtime: Cloud
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [return:read]
+      x-runtime: Both
       x-stage: 3
       security:
         - bearerAuth: []
@@ -2005,6 +2306,8 @@ paths:
           in: query
           schema: { $ref: "#/components/schemas/VendorReturnStatus" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Paged vendor returns
           content:
@@ -2016,6 +2319,8 @@ paths:
       tags: [Purchasing]
       operationId: createVendorReturn
       summary: Create DRAFT return (lines reference PO line + batch + location)
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [return:write]
       x-runtime: BranchLocal
       x-stage: 3
       security:
@@ -2028,6 +2333,8 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/CreateVendorReturnRequest" }
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "201":
           description: Draft vendor return
           content:
@@ -2044,11 +2351,15 @@ paths:
       tags: [Purchasing]
       operationId: getVendorReturn
       summary: Get vendor return detail
-      x-runtime: Cloud
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [return:read]
+      x-runtime: Both
       x-stage: 3
       security:
         - bearerAuth: []
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Return + lines + linked inventory txn
           content:
@@ -2065,6 +2376,8 @@ paths:
       tags: [Purchasing]
       operationId: cancelVendorReturn
       summary: DRAFT-only cancel
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [return:write]
       x-runtime: BranchLocal
       x-stage: 3
       security:
@@ -2072,6 +2385,8 @@ paths:
       parameters:
         - $ref: "#/components/parameters/idempotencyKey"
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Cancelled return
           content:
@@ -2091,6 +2406,8 @@ paths:
         Posts vendor return, producing a negative VENDOR_RETURN_OUT ledger
         transaction, updating balances/cost. Batch quantity cannot exceed
         accepted received stock still available.
+      x-required-roles: [Admin, Pharmacist]
+      x-required-scopes: [return:write]
       x-runtime: BranchLocal
       x-stage: 3
       security:
@@ -2098,6 +2415,8 @@ paths:
       parameters:
         - $ref: "#/components/parameters/idempotencyKey"
       responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Posted return
           content:
@@ -2152,12 +2471,6 @@ components:
         same payload hash replays the original stored response; same key with
         a DIFFERENT payload → 409 IDEMPOTENCY_MISMATCH.
       schema: { type: string, minLength: 16, maxLength: 100 }
-    traceparent:
-      name: traceparent
-      in: header
-      required: false
-      description: W3C trace propagation on every call.
-      schema: { type: string, pattern: "^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$" }
     cursor:
       name: cursor
       in: query
@@ -2184,12 +2497,6 @@ components:
       required: true
       schema: { type: string, format: uuid }
       description: Required branch filter; must be within caller branch scope.
-    organizationId:
-      name: organizationId
-      in: path
-      required: true
-      description: Never trusted from the client; only used in provisioner URLs (if any).
-      schema: { type: string, format: uuid }
     branchId:
       name: branchId
       in: path
@@ -2287,6 +2594,11 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ApiError" }
+    Gone:
+      description: Resource/token is expired, consumed, or no longer available
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApiError" }
     NotFound:
       description: Resource not in scope or does not exist
       content:
@@ -2323,22 +2635,43 @@ components:
     # -------------------------------------------------------------------------
     Money:
       type: string
-      pattern: '^-?\d{1,16}(\.\d{1,2})?$'
+      pattern: '^\d{1,16}(\.\d{1,2})?$'
       description: |
-        Serialized as plain decimal string to preserve numeric(18,2) precision
-        exactly. Never use IEEE-754 floats for money on FE if you want to avoid
-        drift; treat this as a fixed-2-decimal string.
+        Non-negative monetary amount serialized as a plain decimal string to
+        preserve numeric(18,2) precision exactly. Never use IEEE-754 floats for
+        money on FE; treat this as a fixed-2-decimal string. Amounts that must
+        be strictly positive add a >0 rule at the owning field.
       example: "1250.00"
 
     Numeric4:
       type: string
       pattern: '^-?\d{1,14}(\.\d{1,4})?$'
-      description: numeric(18,4) serialized as fixed-4 decimal string (qty / unit cost).
+      description: Signed numeric(18,4) serialized as fixed-4 decimal string; use only for signed ledger deltas.
+
+    NonNegativeNumeric4:
+      type: string
+      pattern: '^\d{1,14}(\.\d{1,4})?$'
+      description: Non-negative numeric(18,4) quantity or unit cost.
+
+    PositiveNumeric4:
+      type: string
+      pattern: '^(?!0+(\.0{1,4})?$)\d{1,14}(\.\d{1,4})?$'
+      description: Strictly positive numeric(18,4) quantity.
 
     Numeric6:
       type: string
       pattern: '^-?\d{1,12}(\.\d{1,6})?$'
-      description: numeric(18,6) serialized as fixed-6 decimal string (conversion factor).
+      description: Signed numeric(18,6) serialized as fixed-6 decimal string.
+
+    PositiveNumeric6:
+      type: string
+      pattern: '^(?!0+(\.0{1,6})?$)\d{1,12}(\.\d{1,6})?$'
+      description: Strictly positive numeric(18,6) conversion factor; conversion must be >0.
+
+    PositiveMoney:
+      type: string
+      pattern: '^(?!0+(\.0{1,2})?$)\d{1,16}(\.\d{1,2})?$'
+      description: Strictly positive monetary amount (numeric(18,2)) for amounts that cannot be zero.
 
     TaxRate:
       type: string
@@ -2404,6 +2737,7 @@ components:
                 NOT_FOUND(404), CONFLICT(409),
                 INVALID_STATE_TRANSITION(409),
                 OUT_OF_STOCK(409), IDEMPOTENCY_MISMATCH(409),
+                GONE(410),
                 VALIDATION_ERROR(422), EXPIRY_POLICY_VIOLATION(422),
                 INTERNAL_ERROR(500).
               enum:
@@ -2416,6 +2750,7 @@ components:
                 - INVALID_STATE_TRANSITION
                 - OUT_OF_STOCK
                 - IDEMPOTENCY_MISMATCH
+                - GONE
                 - VALIDATION_ERROR
                 - EXPIRY_POLICY_VIOLATION
                 - INTERNAL_ERROR
@@ -2427,6 +2762,7 @@ components:
               description: Field-level issues (presence optional).
               items:
                 type: object
+                required: [issue]
                 properties:
                   field: { type: string, description: 'JSON path e.g. "lines[0].quantity"' }
                   issue: { type: string }
@@ -2527,7 +2863,7 @@ components:
 
     CurrentUserContextDto:
       type: object
-      required: [user, organization_id, branch_scope, branch_ids, roles, scopes]
+      required: [user, organization_id, organization_code, branch_scope, branch_ids, roles, scopes, runtime]
       properties:
         user: { $ref: "#/components/schemas/UserDto" }
         organization_id: { $ref: "#/components/schemas/Uuid" }
@@ -2543,10 +2879,6 @@ components:
           type: array
           items: { $ref: "#/components/schemas/PermissionScope" }
         runtime: { $ref: "#/components/schemas/RuntimeMode" }
-        issuance_context:
-          type: object
-          description: Extra context headers/metadata supplied by the FE.
-          additionalProperties: true
 
     # -------------------------------------------------------------------------
     # Identity
@@ -2554,6 +2886,7 @@ components:
     AddressDto:
       type: object
       description: Flattened owned value object (EF address_ prefixed columns)
+      required: [line1, city, country_code]
       properties:
         line1: { type: string, maxLength: 200 }
         line2: { type: string, nullable: true, maxLength: 200 }
@@ -2564,6 +2897,7 @@ components:
 
     OrganizationDto:
       type: object
+      required: [organization_id, organization_code, name, base_currency, time_zone_id, is_active]
       properties:
         organization_id: { $ref: "#/components/schemas/Uuid" }
         organization_code: { type: string, maxLength: 30 }
@@ -2586,7 +2920,7 @@ components:
         address: { $ref: "#/components/schemas/AddressDto" }
         branch:
           type: object
-          required: [code, name]
+          required: [code, name, address]
           properties:
             code: { type: string, maxLength: 30 }
             name: { type: string, maxLength: 150 }
@@ -2602,6 +2936,7 @@ components:
 
     OrganizationSetupResultDto:
       type: object
+      required: [organization, branch, employee, user, enrollment_setup_state]
       properties:
         organization: { $ref: "#/components/schemas/OrganizationDto" }
         branch: { $ref: "#/components/schemas/BranchDto" }
@@ -2613,6 +2948,7 @@ components:
 
     BranchDto:
       type: object
+      required: [branch_id, organization_id, code, name, is_active]
       properties:
         branch_id: { $ref: "#/components/schemas/Uuid" }
         organization_id: { $ref: "#/components/schemas/Uuid" }
@@ -2644,6 +2980,7 @@ components:
 
     EnrollmentTokenDto:
       type: object
+      required: [enrollment_id, token, expires_at]
       properties:
         enrollment_id: { $ref: "#/components/schemas/Uuid" }
         token:
@@ -2659,6 +2996,7 @@ components:
 
     BranchEnrollmentResultDto:
       type: object
+      required: [organization_id, branch_id, runtime_credential, initial_cursor, credential_expires_at]
       properties:
         organization_id: { $ref: "#/components/schemas/Uuid" }
         branch_id: { $ref: "#/components/schemas/Uuid" }
@@ -2673,6 +3011,7 @@ components:
 
     EmployeeDto:
       type: object
+      required: [employee_id, organization_id, branch_id, employee_no, full_name, address, hired_on, is_active]
       properties:
         employee_id: { $ref: "#/components/schemas/Uuid" }
         organization_id: { $ref: "#/components/schemas/Uuid" }
@@ -2682,14 +3021,15 @@ components:
         email: { type: string, nullable: true, format: email, maxLength: 254 }
         phone: { type: string, nullable: true, maxLength: 30 }
         job_title: { type: string, nullable: true, maxLength: 80 }
-        hired_on: { type: string, format: date, nullable: true }
+        address: { $ref: "#/components/schemas/AddressDto" }
+        hired_on: { type: string, format: date }
         is_active: { type: boolean }
         created_at: { $ref: "#/components/schemas/Timestamp" }
         updated_at: { $ref: "#/components/schemas/Timestamp" }
 
     EmployeeRequest:
       type: object
-      required: [branch_id, employee_no, full_name]
+      required: [branch_id, employee_no, full_name, address, hired_on, is_active]
       properties:
         branch_id: { $ref: "#/components/schemas/Uuid" }
         employee_no: { type: string, maxLength: 30 }
@@ -2697,6 +3037,9 @@ components:
         email: { type: string, nullable: true, format: email, maxLength: 254 }
         phone: { type: string, nullable: true, maxLength: 30 }
         job_title: { type: string, nullable: true, maxLength: 80 }
+        address: { $ref: "#/components/schemas/AddressDto" }
+        hired_on: { type: string, format: date }
+        is_active: { type: boolean }
 
     EmployeePatchRequest:
       type: object
@@ -2707,6 +3050,7 @@ components:
         email: { type: string, nullable: true, format: email, maxLength: 254 }
         phone: { type: string, nullable: true, maxLength: 30 }
         job_title: { type: string, nullable: true, maxLength: 80 }
+        address: { $ref: "#/components/schemas/AddressDto" }
         hired_on: { type: string, format: date, nullable: true }
         is_active: { type: boolean }
 
@@ -2715,17 +3059,26 @@ components:
       required: [user_id, employee_id, username, role, branch_scope, is_active]
       properties:
         user_id: { $ref: "#/components/schemas/Uuid" }
-        employee_id: { $ref: "#/components/schemas/Uuid", nullable: true }
+        employee_id: { $ref: "#/components/schemas/Uuid" }
         username: { type: string, maxLength: 80 }
         role: { $ref: "#/components/schemas/Role" }
         branch_scope: { $ref: "#/components/schemas/BranchScope" }
         is_active: { type: boolean }
         access_failed_count: { type: integer, readOnly: true }
-        lockout_end: { $ref: "#/components/schemas/Timestamp", nullable: true, readOnly: true }
-        last_login_at: { $ref: "#/components/schemas/Timestamp", nullable: true, readOnly: true }
+        lockout_end:
+          allOf:
+            - $ref: "#/components/schemas/Timestamp"
+          nullable: true
+          readOnly: true
+        last_login_at:
+          allOf:
+            - $ref: "#/components/schemas/Timestamp"
+          nullable: true
+          readOnly: true
 
     BranchAccessGrantDto:
       type: object
+      required: [branch_id]
       properties:
         branch_id: { $ref: "#/components/schemas/Uuid" }
         branch_code: { type: string, readOnly: true }
@@ -2767,10 +3120,12 @@ components:
     # -------------------------------------------------------------------------
     ProductCategoryDto:
       type: object
+      required: [category_id, code, name, is_active]
       properties:
         category_id: { $ref: "#/components/schemas/Uuid" }
         parent_category_id:
-          $ref: "#/components/schemas/Uuid"
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
           nullable: true
         code: { type: string, maxLength: 30 }
         name: { type: string, maxLength: 100 }
@@ -2783,7 +3138,10 @@ components:
       type: object
       required: [code, name]
       properties:
-        parent_category_id: { $ref: "#/components/schemas/Uuid", nullable: true }
+        parent_category_id:
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
+          nullable: true
         code: { type: string, maxLength: 30 }
         name: { type: string, maxLength: 100 }
         description: { type: string, nullable: true, maxLength: 250 }
@@ -2792,7 +3150,10 @@ components:
     ProductCategoryPatchRequest:
       type: object
       properties:
-        parent_category_id: { $ref: "#/components/schemas/Uuid", nullable: true }
+        parent_category_id:
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
+          nullable: true
         code: { type: string, maxLength: 30 }
         name: { type: string, maxLength: 100 }
         description: { type: string, nullable: true, maxLength: 250 }
@@ -2800,12 +3161,17 @@ components:
 
     ProductUomDto:
       type: object
+      required: [product_uom_id, uom_code, display_name, conversion_to_base, is_base, is_sellable, is_purchasable, is_active]
       properties:
         product_uom_id: { $ref: "#/components/schemas/Uuid" }
         uom_code: { type: string, maxLength: 20 }
         display_name: { type: string, maxLength: 50 }
-        conversion_to_base: { $ref: "#/components/schemas/Numeric6" }
-        sale_unit_price: { $ref: "#/components/schemas/Numeric4", description: "Required (non-null, >= 0) when is_sellable=true; the authoritative POS sale price." }
+        conversion_to_base: { $ref: "#/components/schemas/PositiveNumeric6" }
+        sale_unit_price:
+          allOf:
+            - $ref: "#/components/schemas/NonNegativeNumeric4"
+          nullable: true
+          description: "Required (non-null, >= 0) when is_sellable=true; the authoritative POS sale price. Optional and null when is_sellable=false."
         is_base: { type: boolean }
         is_sellable: { type: boolean }
         is_purchasable: { type: boolean }
@@ -2817,8 +3183,11 @@ components:
       properties:
         uom_code: { type: string, maxLength: 20 }
         display_name: { type: string, maxLength: 50 }
-        conversion_to_base: { $ref: "#/components/schemas/Numeric6" }
-        sale_unit_price: { $ref: "#/components/schemas/Numeric4", nullable: true }
+        conversion_to_base: { $ref: "#/components/schemas/PositiveNumeric6" }
+        sale_unit_price:
+          allOf:
+            - $ref: "#/components/schemas/NonNegativeNumeric4"
+          nullable: true
         is_base: { type: boolean, default: false }
         is_sellable: { type: boolean, default: false }
         is_purchasable: { type: boolean, default: false }
@@ -2831,13 +3200,17 @@ components:
         stock). is_active=false to deactivate; never hard delete.
       properties:
         display_name: { type: string, maxLength: 50 }
-        sale_unit_price: { $ref: "#/components/schemas/Numeric4", nullable: true }
+        sale_unit_price:
+          allOf:
+            - $ref: "#/components/schemas/NonNegativeNumeric4"
+          nullable: true
         is_sellable: { type: boolean }
         is_purchasable: { type: boolean }
         is_active: { type: boolean }
 
     ProductDto:
       type: object
+      required: [product_id, category_id, sku, name, base_uom_code, tax_rate, lot_tracking_required, expiry_alert_days, is_active, uoms]
       properties:
         product_id: { $ref: "#/components/schemas/Uuid" }
         category_id: { $ref: "#/components/schemas/Uuid" }
@@ -2847,7 +3220,10 @@ components:
         generic_name: { type: string, nullable: true, maxLength: 180 }
         brand_name: { type: string, nullable: true, maxLength: 180 }
         base_uom_code: { type: string, maxLength: 20 }
-        tax_rate: { $ref: "#/components/schemas/TaxRate", description: Fractional 0..1 }
+        tax_rate:
+          allOf:
+            - $ref: "#/components/schemas/TaxRate"
+          description: Fractional 0..1
         image_url: { type: string, nullable: true, maxLength: 300 }
         lot_tracking_required: { type: boolean }
         expiry_alert_days: { type: integer, minimum: 0, maximum: 3650 }
@@ -2869,12 +3245,16 @@ components:
         generic_name: { type: string, nullable: true, maxLength: 180 }
         brand_name: { type: string, nullable: true, maxLength: 180 }
         base_uom_code: { type: string, maxLength: 20 }
-        tax_rate: { $ref: "#/components/schemas/TaxRate", default: "0.0000" }
+        tax_rate:
+          allOf:
+            - $ref: "#/components/schemas/TaxRate"
+          default: "0.0000"
         image_url: { type: string, nullable: true, maxLength: 300 }
         lot_tracking_required: { type: boolean, default: false }
         expiry_alert_days: { type: integer, default: 0, minimum: 0, maximum: 3650 }
         uoms:
           type: array
+          minItems: 1
           description: Must include exactly one is_base=true entry with conversion_to_base=1.
           items: { $ref: "#/components/schemas/ProductUomRequest" }
 
@@ -2894,24 +3274,32 @@ components:
 
     ReorderRuleDto:
       type: object
+      required: [reorder_rule_id, product_id, branch_id, reorder_point_base, reorder_quantity_base, is_active]
       properties:
         reorder_rule_id: { $ref: "#/components/schemas/Uuid" }
         product_id: { $ref: "#/components/schemas/Uuid" }
         branch_id: { $ref: "#/components/schemas/Uuid" }
-        reorder_point_base: { $ref: "#/components/schemas/Numeric4" }
-        reorder_quantity_base: { $ref: "#/components/schemas/Numeric4" }
-        max_quantity_base: { $ref: "#/components/schemas/Numeric4", nullable: true }
+        reorder_point_base: { $ref: "#/components/schemas/NonNegativeNumeric4" }
+        reorder_quantity_base: { $ref: "#/components/schemas/PositiveNumeric4" }
+        max_quantity_base:
+          allOf:
+            - $ref: "#/components/schemas/NonNegativeNumeric4"
+          nullable: true
         is_active: { type: boolean }
 
     ReorderRuleRequest:
       type: object
-      required: [product_id, branch_id, reorder_point_base, reorder_quantity_base]
+      description: |
+        Product and branch are taken from the path; they are not accepted in
+        the body, so the path is the single source of truth.
+      required: [reorder_point_base, reorder_quantity_base]
       properties:
-        product_id: { $ref: "#/components/schemas/Uuid" }
-        branch_id: { $ref: "#/components/schemas/Uuid" }
-        reorder_point_base: { $ref: "#/components/schemas/Numeric4" }
-        reorder_quantity_base: { $ref: "#/components/schemas/Numeric4" }
-        max_quantity_base: { $ref: "#/components/schemas/Numeric4", nullable: true }
+        reorder_point_base: { $ref: "#/components/schemas/NonNegativeNumeric4" }
+        reorder_quantity_base: { $ref: "#/components/schemas/PositiveNumeric4" }
+        max_quantity_base:
+          allOf:
+            - $ref: "#/components/schemas/NonNegativeNumeric4"
+          nullable: true
         is_active: { type: boolean, default: true }
 
     # -------------------------------------------------------------------------
@@ -2919,10 +3307,10 @@ components:
     # -------------------------------------------------------------------------
     LocationType:
       type: string
-      enum: [SELLABLE, QUARANTINE, DAMAGED, SCRAP]
+      enum: [SELLABLE, QUARANTINE, SCRAP]
       description: >
         Only SELLABLE location_type may have is_sellable=true.
-        DAMAGED / QUARANTINE / SCRAP are always is_sellable=false.
+        QUARANTINE and SCRAP are always is_sellable=false.
 
     BatchQualityStatus:
       type: string
@@ -2934,6 +3322,7 @@ components:
 
     InventoryLocationDto:
       type: object
+      required: [location_id, branch_id, location_code, name, location_type, is_sellable, is_active]
       properties:
         location_id: { $ref: "#/components/schemas/Uuid" }
         branch_id: { $ref: "#/components/schemas/Uuid" }
@@ -2962,8 +3351,12 @@ components:
 
     InventoryBatchDto:
       type: object
+      required: [batch_id, product_id, batch_number, quality_status]
       properties:
-        batch_id: { $ref: "#/components/schemas/Uuid", description: Deterministic UUIDv5; identical across branches }
+        batch_id:
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
+          description: Deterministic UUIDv5; identical across branches
         product_id: { $ref: "#/components/schemas/Uuid" }
         batch_number: { type: string, maxLength: 80, description: "Exact, case-sensitive" }
         manufactured_on: { type: string, format: date, nullable: true }
@@ -2976,16 +3369,26 @@ components:
 
     InventoryBalanceDto:
       type: object
+      required: [product_id, branch_id, location_id, batch_id, on_hand_qty_base, average_unit_cost, available_qty_base]
       properties:
         product_id: { $ref: "#/components/schemas/Uuid" }
         branch_id: { $ref: "#/components/schemas/Uuid" }
         location_id: { $ref: "#/components/schemas/Uuid" }
         batch_id: { $ref: "#/components/schemas/Uuid" }
-        on_hand_qty_base: { $ref: "#/components/schemas/Numeric4", description: Always >= 0 }
-        average_unit_cost: { $ref: "#/components/schemas/Numeric4" }
+        on_hand_qty_base:
+          allOf:
+            - $ref: "#/components/schemas/NonNegativeNumeric4"
+          description: Always >= 0
+        average_unit_cost: { $ref: "#/components/schemas/NonNegativeNumeric4" }
         available_qty_base:
-          $ref: "#/components/schemas/Numeric4"
-          description: Server-derived eligible (sellable location + acceptable quality/expiry); equals on_hand in MVP (no reservations).
+          allOf:
+            - $ref: "#/components/schemas/NonNegativeNumeric4"
+          description: |
+            Server-derived eligible quantity: sum of on_hand from sellable
+            locations for batches that are AVAILABLE, not expired by business
+            date, and not recalled. With no reservations in MVP this normally
+            equals eligible on_hand, not raw on_hand across all locations.
+            Never negative.
         row_version:
           type: integer
           format: int64
@@ -3017,25 +3420,46 @@ components:
 
     InventoryTxnLineDto:
       type: object
+      required: [inventory_txn_line_id, product_id, location_id, batch_id, product_uom_id, entered_qty, conversion_snapshot, quantity_delta_base]
       properties:
         inventory_txn_line_id: { $ref: "#/components/schemas/Uuid" }
         product_id: { $ref: "#/components/schemas/Uuid" }
         location_id: { $ref: "#/components/schemas/Uuid" }
         batch_id: { $ref: "#/components/schemas/Uuid" }
         product_uom_id:
-          $ref: "#/components/schemas/Uuid"
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
           description: Product's base UOM for ledger lines.
-        entered_qty: { $ref: "#/components/schemas/Numeric4" }
-        conversion_snapshot: { $ref: "#/components/schemas/Numeric6" }
-        quantity_delta_base: { $ref: "#/components/schemas/Numeric4", description: Signed; never 0. }
-        unit_cost_base: { $ref: "#/components/schemas/Numeric4", nullable: true }
-        sales_order_line_id: { $ref: "#/components/schemas/Uuid", nullable: true }
-        sales_return_line_id: { $ref: "#/components/schemas/Uuid", nullable: true }
-        purchase_order_line_id: { $ref: "#/components/schemas/Uuid", nullable: true }
-        vendor_return_line_id: { $ref: "#/components/schemas/Uuid", nullable: true }
+        entered_qty: { $ref: "#/components/schemas/PositiveNumeric4" }
+        conversion_snapshot: { $ref: "#/components/schemas/PositiveNumeric6" }
+        quantity_delta_base:
+          allOf:
+            - $ref: "#/components/schemas/Numeric4"
+          description: Signed non-zero base-quantity delta; never 0.
+        unit_cost_base:
+          allOf:
+            - $ref: "#/components/schemas/NonNegativeNumeric4"
+          nullable: true
+        sales_order_line_id:
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
+          nullable: true
+        sales_return_line_id:
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
+          nullable: true
+        purchase_order_line_id:
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
+          nullable: true
+        vendor_return_line_id:
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
+          nullable: true
 
     InventoryTxnDto:
       type: object
+      required: [inventory_txn_id, branch_id, transaction_no, transaction_type, status, lines]
       properties:
         inventory_txn_id: { $ref: "#/components/schemas/Uuid" }
         branch_id: { $ref: "#/components/schemas/Uuid" }
@@ -3044,32 +3468,69 @@ components:
         status: { $ref: "#/components/schemas/InventoryTxnStatus" }
         reason_code: { type: string, nullable: true, maxLength: 40 }
         note: { type: string, nullable: true, maxLength: 500 }
-        posted_at: { $ref: "#/components/schemas/Timestamp", nullable: true }
+        posted_at:
+          allOf:
+            - $ref: "#/components/schemas/Timestamp"
+          nullable: true
         created_by_employee_id: { $ref: "#/components/schemas/Uuid" }
-        reverses_inventory_txn_id: { $ref: "#/components/schemas/Uuid", nullable: true }
-        sales_order_id: { $ref: "#/components/schemas/Uuid", nullable: true }
-        sales_return_id: { $ref: "#/components/schemas/Uuid", nullable: true }
-        purchase_order_id: { $ref: "#/components/schemas/Uuid", nullable: true }
-        vendor_return_id: { $ref: "#/components/schemas/Uuid", nullable: true }
+        reverses_inventory_txn_id:
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
+          nullable: true
+        sales_order_id:
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
+          nullable: true
+        sales_return_id:
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
+          nullable: true
+        purchase_order_id:
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
+          nullable: true
+        vendor_return_id:
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
+          nullable: true
         lines:
           type: array
           items: { $ref: "#/components/schemas/InventoryTxnLineDto" }
 
     InventoryTxnRequest:
       type: object
-      required: [transaction_type, branch_id, lines]
+      required: [transaction_type, branch_id, reason_code, lines]
       properties:
         transaction_type:
-          allOf:
-            - $ref: "#/components/schemas/InventoryTxnType"
-          description: For /inventory/adjustments this is OPENING_BALANCE, ADJUSTMENT_IN, ADJUSTMENT_OUT, or REVERSAL.
+          type: string
+          enum: [OPENING_BALANCE, ADJUSTMENT_IN, ADJUSTMENT_OUT, REVERSAL]
+          description: |
+            Adjustment endpoint only. Ledger-generated types (SALE_ISSUE,
+            SALES_RETURN_IN, PURCHASE_RECEIPT, VENDOR_RETURN_OUT, SCRAP_OUT)
+            are server-created by their owning workflows and cannot be posted
+            here.
         branch_id: { $ref: "#/components/schemas/Uuid" }
-        reason_code: { type: string, nullable: true, maxLength: 40 }
+        reason_code: { type: string, maxLength: 40 }
         note: { type: string, nullable: true, maxLength: 500 }
         reverses_inventory_txn_id:
-          $ref: "#/components/schemas/Uuid"
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
           nullable: true
-          description: Required when transaction_type=REVERSAL.
+          description: Required when transaction_type=REVERSAL; must reference a POSTED transaction in the same branch.
+        lines:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/InventoryTxnLineRequest" }
+
+    InventoryTxnPatchRequest:
+      type: object
+      description: |
+        Partial edit for a DRAFT adjustment only. transaction_type, branch_id,
+        and reverses_inventory_txn_id are immutable after creation. Posted
+        transactions are immutable and must be corrected by a new REVERSAL.
+      properties:
+        reason_code: { type: string, maxLength: 40 }
+        note: { type: string, nullable: true, maxLength: 500 }
         lines:
           type: array
           minItems: 1
@@ -3082,19 +3543,22 @@ components:
         product_id: { $ref: "#/components/schemas/Uuid" }
         location_id: { $ref: "#/components/schemas/Uuid" }
         batch_id:
-          $ref: "#/components/schemas/Uuid"
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
           description: >-
             For non-lot-tracked products use the system NON-LOT batch row.
         product_uom_id:
-          $ref: "#/components/schemas/Uuid"
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
           description: Typically the product's base UOM; conversion must be >0.
-        entered_qty: { $ref: "#/components/schemas/Numeric4" }
+        entered_qty: { $ref: "#/components/schemas/PositiveNumeric4" }
         unit_cost_base:
-          $ref: "#/components/schemas/Numeric4"
+          allOf:
+            - $ref: "#/components/schemas/NonNegativeNumeric4"
           nullable: true
           description: >
             Required for ADJUSTMENT_IN / OPENING_BALANCE; server uses current
-            balance cost for ADJUSTMENT_OUT and reversals.
+            balance cost for ADJUSTMENT_OUT and reversals; never negative.
 
     # -------------------------------------------------------------------------
     # Sales (Stage 2, BranchLocal)
@@ -3105,21 +3569,26 @@ components:
 
     SalesOrderLineDto:
       type: object
+      required: [order_line_id, product_id, product_uom_id, entered_qty, conversion_snapshot, quantity_base, unit_price_snapshot, discount_amount, tax_rate_snapshot, tax_amount_snapshot, line_total]
       properties:
         order_line_id: { $ref: "#/components/schemas/Uuid" }
         product_id: { $ref: "#/components/schemas/Uuid" }
         product_uom_id: { $ref: "#/components/schemas/Uuid" }
-        entered_qty: { $ref: "#/components/schemas/Numeric4" }
-        conversion_snapshot: { $ref: "#/components/schemas/Numeric6" }
-        quantity_base: { $ref: "#/components/schemas/Numeric4" }
-        unit_price_snapshot: { $ref: "#/components/schemas/Numeric4" }
-        discount_amount: { $ref: "#/components/schemas/Money", description: Always 0 for MVP }
+        entered_qty: { $ref: "#/components/schemas/PositiveNumeric4" }
+        conversion_snapshot: { $ref: "#/components/schemas/PositiveNumeric6" }
+        quantity_base: { $ref: "#/components/schemas/PositiveNumeric4" }
+        unit_price_snapshot: { $ref: "#/components/schemas/NonNegativeNumeric4" }
+        discount_amount:
+          allOf:
+            - $ref: "#/components/schemas/Money"
+          description: Always 0 for MVP
         tax_rate_snapshot: { $ref: "#/components/schemas/TaxRate" }
         tax_amount_snapshot: { $ref: "#/components/schemas/Money" }
         line_total: { $ref: "#/components/schemas/Money" }
 
     SalesOrderDto:
       type: object
+      required: [sales_order_id, branch_id, created_by_employee_id, order_no, channel, order_status, currency_code, created_at, lines]
       properties:
         sales_order_id: { $ref: "#/components/schemas/Uuid" }
         branch_id: { $ref: "#/components/schemas/Uuid" }
@@ -3132,7 +3601,10 @@ components:
         estimated_tax_total: { $ref: "#/components/schemas/Money" }
         estimated_grand_total: { $ref: "#/components/schemas/Money" }
         created_at: { $ref: "#/components/schemas/Timestamp" }
-        completed_at: { $ref: "#/components/schemas/Timestamp", nullable: true }
+        completed_at:
+          allOf:
+            - $ref: "#/components/schemas/Timestamp"
+          nullable: true
         lines:
           type: array
           items: { $ref: "#/components/schemas/SalesOrderLineDto" }
@@ -3157,7 +3629,7 @@ components:
       properties:
         product_id: { $ref: "#/components/schemas/Uuid" }
         product_uom_id: { $ref: "#/components/schemas/Uuid" }
-        entered_qty: { $ref: "#/components/schemas/Numeric4" }
+        entered_qty: { $ref: "#/components/schemas/PositiveNumeric4" }
 
     SalesOrderLinesRequest:
       type: object
@@ -3176,13 +3648,14 @@ components:
         cash_tendered >= payable amount; change = tendered - due >= 0.
         Cashier full payment only; partial/credit rejected.
       properties:
-        cash_tendered_amount: { $ref: "#/components/schemas/Money" }
+        cash_tendered_amount: { $ref: "#/components/schemas/PositiveMoney" }
         method:
           type: string
           enum: [CASH]
 
     CompleteSalesOrderResultDto:
       type: object
+      required: [sales_order, invoice, payment, inventory_txn]
       properties:
         sales_order: { $ref: "#/components/schemas/SalesOrderDto" }
         invoice: { $ref: "#/components/schemas/SalesInvoiceDto" }
@@ -3201,24 +3674,29 @@ components:
 
     SalesInvoiceLineDto:
       type: object
+      required: [invoice_line_id, source_order_line_id, product_id, product_uom_id, entered_qty, conversion_snapshot, quantity_base, unit_price_snapshot, discount_amount, tax_rate_snapshot, tax_amount_snapshot, net_amount, line_total, unit_cost_snapshot]
       properties:
         invoice_line_id: { $ref: "#/components/schemas/Uuid" }
         source_order_line_id: { $ref: "#/components/schemas/Uuid" }
         product_id: { $ref: "#/components/schemas/Uuid" }
         product_uom_id: { $ref: "#/components/schemas/Uuid" }
-        entered_qty: { $ref: "#/components/schemas/Numeric4" }
-        conversion_snapshot: { $ref: "#/components/schemas/Numeric6" }
-        quantity_base: { $ref: "#/components/schemas/Numeric4" }
-        unit_price_snapshot: { $ref: "#/components/schemas/Numeric4" }
+        entered_qty: { $ref: "#/components/schemas/PositiveNumeric4" }
+        conversion_snapshot: { $ref: "#/components/schemas/PositiveNumeric6" }
+        quantity_base: { $ref: "#/components/schemas/PositiveNumeric4" }
+        unit_price_snapshot: { $ref: "#/components/schemas/NonNegativeNumeric4" }
         discount_amount: { $ref: "#/components/schemas/Money" }
         tax_rate_snapshot: { $ref: "#/components/schemas/TaxRate" }
         tax_amount_snapshot: { $ref: "#/components/schemas/Money" }
         net_amount: { $ref: "#/components/schemas/Money" }
-        line_total: { $ref: "#/components/schemas/Money", description: tax-inclusive }
-        unit_cost_snapshot: { $ref: "#/components/schemas/Numeric4" }
+        line_total:
+          allOf:
+            - $ref: "#/components/schemas/Money"
+          description: tax-inclusive
+        unit_cost_snapshot: { $ref: "#/components/schemas/NonNegativeNumeric4" }
 
     SalesInvoiceDto:
       type: object
+      required: [invoice_id, sales_order_id, branch_id, invoice_no, status, currency_code, subtotal, discount_total, tax_total, grand_total, paid_amount, refunded_amount, payment_status, issued_at, lines]
       properties:
         invoice_id: { $ref: "#/components/schemas/Uuid" }
         sales_order_id: { $ref: "#/components/schemas/Uuid" }
@@ -3247,6 +3725,7 @@ components:
 
     SalesPaymentDto:
       type: object
+      required: [payment_id, invoice_id, amount_due, cash_tendered_amount, change_amount, method, received_by_employee_id, paid_at]
       properties:
         payment_id: { $ref: "#/components/schemas/Uuid" }
         invoice_id: { $ref: "#/components/schemas/Uuid" }
@@ -3271,42 +3750,58 @@ components:
 
     SalesReturnLineDto:
       type: object
+      required: [return_line_id, invoice_line_id, product_id, batch_id, destination_location_id, quantity_base, refund_amount, disposition]
       properties:
         return_line_id: { $ref: "#/components/schemas/Uuid" }
         invoice_line_id: { $ref: "#/components/schemas/Uuid" }
         product_id: { $ref: "#/components/schemas/Uuid" }
-        batch_id: { $ref: "#/components/schemas/Uuid", description: Server-derived from original sale }
+        batch_id:
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
+          description: Server-derived from original sale
         destination_location_id:
-          $ref: "#/components/schemas/Uuid"
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
           description: Server-selected; callers do not choose.
-        quantity_base: { $ref: "#/components/schemas/Numeric4" }
+        quantity_base: { $ref: "#/components/schemas/PositiveNumeric4" }
         refund_amount: { $ref: "#/components/schemas/Money" }
         disposition: { $ref: "#/components/schemas/ReturnDisposition" }
 
     SalesReturnDto:
       type: object
+      required: [reason_code]
       properties:
         return_id: { $ref: "#/components/schemas/Uuid" }
         invoice_id: { $ref: "#/components/schemas/Uuid" }
         branch_id: { $ref: "#/components/schemas/Uuid" }
         return_no: { type: string, maxLength: 40 }
         status: { $ref: "#/components/schemas/SalesReturnStatus" }
-        reason_code: { type: string, nullable: true, maxLength: 40 }
+        reason_code: { type: string, maxLength: 40 }
         refund_amount: { $ref: "#/components/schemas/Money" }
         refund_status: { $ref: "#/components/schemas/SalesRefundStatus" }
         received_by_employee_id: { $ref: "#/components/schemas/Uuid" }
-        approved_by_employee_id: { $ref: "#/components/schemas/Uuid", nullable: true }
+        approved_by_employee_id:
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
+          nullable: true
         received_at: { $ref: "#/components/schemas/Timestamp" }
         lines:
           type: array
           items: { $ref: "#/components/schemas/SalesReturnLineDto" }
-        inventory_txn:
-          $ref: "#/components/schemas/InventoryTxnDto"
+        inventory_txns:
+          type: array
+          maxItems: 2
+          description: |
+            Zero transactions for a non-restocking return, one SALES_RETURN_IN
+            when stock is restocked/quarantined, and up to two when RESTOCK
+            plus an additional SCRAP_OUT is required. Server-created only.
+          items: { $ref: "#/components/schemas/InventoryTxnDto" }
         refund:
           $ref: "#/components/schemas/SalesRefundDto"
 
     SalesRefundDto:
       type: object
+      required: [refund_id, sales_return_id, invoice_id, amount, method, processed_by_employee_id, refunded_at]
       properties:
         refund_id: { $ref: "#/components/schemas/Uuid" }
         sales_return_id: { $ref: "#/components/schemas/Uuid" }
@@ -3323,7 +3818,8 @@ components:
         invoice_id: { $ref: "#/components/schemas/Uuid" }
         reason_code: { type: string, maxLength: 40 }
         approved_by_employee_id:
-          $ref: "#/components/schemas/Uuid"
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
           nullable: true
           description: |
             Optional; if supplied, must be a different active Admin/Pharmacist
@@ -3342,7 +3838,7 @@ components:
       required: [invoice_line_id, quantity_base, disposition]
       properties:
         invoice_line_id: { $ref: "#/components/schemas/Uuid" }
-        quantity_base: { $ref: "#/components/schemas/Numeric4" }
+        quantity_base: { $ref: "#/components/schemas/PositiveNumeric4" }
         disposition: { $ref: "#/components/schemas/ReturnDisposition" }
 
     # -------------------------------------------------------------------------
@@ -3350,6 +3846,7 @@ components:
     # -------------------------------------------------------------------------
     SupplierDto:
       type: object
+      required: [supplier_id, supplier_code, legal_name, default_lead_time_days, is_active]
       properties:
         supplier_id: { $ref: "#/components/schemas/Uuid" }
         supplier_code: { type: string, maxLength: 30 }
@@ -3402,33 +3899,40 @@ components:
 
     PurchaseOrderLineDto:
       type: object
+      required: [po_line_id, product_id, product_uom_id, entered_ordered_qty, conversion_snapshot, ordered_qty_base, received_qty_base, rejected_qty_base, cancelled_qty_base, unit_cost_entered, unit_cost_base, discount_amount, tax_rate_snapshot, tax_amount, line_total, allocated_additional_cost, min_remaining_shelf_days]
       properties:
         po_line_id: { $ref: "#/components/schemas/Uuid" }
         product_id: { $ref: "#/components/schemas/Uuid" }
         product_uom_id: { $ref: "#/components/schemas/Uuid" }
-        entered_ordered_qty: { $ref: "#/components/schemas/Numeric4" }
-        conversion_snapshot: { $ref: "#/components/schemas/Numeric6" }
-        ordered_qty_base: { $ref: "#/components/schemas/Numeric4" }
+        entered_ordered_qty: { $ref: "#/components/schemas/PositiveNumeric4" }
+        conversion_snapshot: { $ref: "#/components/schemas/PositiveNumeric6" }
+        ordered_qty_base: { $ref: "#/components/schemas/PositiveNumeric4" }
         received_qty_base:
-          $ref: "#/components/schemas/Numeric4"
+          allOf:
+            - $ref: "#/components/schemas/NonNegativeNumeric4"
           description: cumulative accepted quantity only (rejected excluded)
-        rejected_qty_base: { $ref: "#/components/schemas/Numeric4" }
-        cancelled_qty_base: { $ref: "#/components/schemas/Numeric4" }
+        rejected_qty_base: { $ref: "#/components/schemas/NonNegativeNumeric4" }
+        cancelled_qty_base: { $ref: "#/components/schemas/NonNegativeNumeric4" }
         remaining_qty_base:
-          $ref: "#/components/schemas/Numeric4"
+          allOf:
+            - $ref: "#/components/schemas/NonNegativeNumeric4"
           readOnly: true
           description: ordered - accepted - cancelled
-        unit_cost_entered: { $ref: "#/components/schemas/Numeric4" }
-        unit_cost_base: { $ref: "#/components/schemas/Numeric4" }
+        unit_cost_entered: { $ref: "#/components/schemas/NonNegativeNumeric4" }
+        unit_cost_base: { $ref: "#/components/schemas/NonNegativeNumeric4" }
         discount_amount: { $ref: "#/components/schemas/Money" }
         tax_rate_snapshot: { $ref: "#/components/schemas/TaxRate" }
         tax_amount: { $ref: "#/components/schemas/Money" }
-        line_total: { $ref: "#/components/schemas/Money", description: "line net, tax-exclusive" }
+        line_total:
+          allOf:
+            - $ref: "#/components/schemas/Money"
+          description: "line net, tax-exclusive"
         allocated_additional_cost: { $ref: "#/components/schemas/Money" }
         min_remaining_shelf_days: { type: integer, minimum: 0, default: 90 }
 
     PurchaseOrderDto:
       type: object
+      required: [purchase_order_id, po_no, supplier_id, branch_id, created_by_employee_id, status, currency_code, subtotal, tax_total, additional_costs, total_amount, paid_amount, payment_status, lines]
       properties:
         purchase_order_id: { $ref: "#/components/schemas/Uuid" }
         po_no: { type: string, maxLength: 40 }
@@ -3444,11 +3948,15 @@ components:
         total_amount: { $ref: "#/components/schemas/Money" }
         paid_amount: { $ref: "#/components/schemas/Money" }
         outstanding_amount:
-          $ref: "#/components/schemas/Money"
+          allOf:
+            - $ref: "#/components/schemas/Money"
           readOnly: true
           description: total - paid
         payment_status: { $ref: "#/components/schemas/PurchaseOrderPaymentStatus" }
-        ordered_at: { $ref: "#/components/schemas/Timestamp", nullable: true }
+        ordered_at:
+          allOf:
+            - $ref: "#/components/schemas/Timestamp"
+          nullable: true
         lines:
           type: array
           items: { $ref: "#/components/schemas/PurchaseOrderLineDto" }
@@ -3461,10 +3969,17 @@ components:
       properties:
         product_id: { $ref: "#/components/schemas/Uuid" }
         product_uom_id: { $ref: "#/components/schemas/Uuid" }
-        entered_ordered_qty: { $ref: "#/components/schemas/Numeric4" }
-        unit_cost_entered: { $ref: "#/components/schemas/Numeric4" }
-        discount_amount: { $ref: "#/components/schemas/Money", default: "0.00" }
-        tax_rate_snapshot: { $ref: "#/components/schemas/TaxRate", nullable: true, description: Defaults to PRODUCT.tax_rate at server }
+        entered_ordered_qty: { $ref: "#/components/schemas/PositiveNumeric4" }
+        unit_cost_entered: { $ref: "#/components/schemas/NonNegativeNumeric4" }
+        discount_amount:
+          allOf:
+            - $ref: "#/components/schemas/Money"
+          default: "0.00"
+        tax_rate_snapshot:
+          allOf:
+            - $ref: "#/components/schemas/TaxRate"
+          nullable: true
+          description: Defaults to PRODUCT.tax_rate at server
         min_remaining_shelf_days: { type: integer, minimum: 0, default: 90 }
 
     CreatePurchaseOrderRequest:
@@ -3529,18 +4044,37 @@ components:
 
     ReceiveLineRequest:
       type: object
-      required: [po_line_id, product_id, product_uom_id, received_qty_base, accepted_qty_base, batch_number]
+      required: [po_line_id, product_id, product_uom_id, entered_qty, batch_number]
       description: |
-        received_qty_base = accepted_qty_base + rejected_qty_base
-        accepted quantity accumulates to PO received_qty_base; rejected
+        Quantities are entered in `product_uom_id`; the server normalizes them
+        to base UOM. `entered_accepted_qty` defaults to `entered_qty` and
+        `entered_rejected_qty` defaults to 0. If normalized `*_qty_base`
+        fields are supplied, the server validates that they match the entered
+        quantities and the equation received = accepted + rejected.
+        Accepted quantity accumulates to PO received_qty_base; rejected
         quantity stays replaceable/cancellable; batch supplied per line.
       properties:
         po_line_id: { $ref: "#/components/schemas/Uuid" }
         product_id: { $ref: "#/components/schemas/Uuid" }
-        product_uom_id: { $ref: "#/components/schemas/Uuid" }
-        received_qty_base: { $ref: "#/components/schemas/Numeric4", description: accepted + rejected }
-        accepted_qty_base: { $ref: "#/components/schemas/Numeric4" }
-        rejected_qty_base: { $ref: "#/components/schemas/Numeric4", default: "0.0000" }
+        product_uom_id:
+          allOf:
+            - $ref: "#/components/schemas/Uuid"
+          description: Entered UOM for the entered_* quantity fields.
+        entered_qty: { $ref: "#/components/schemas/PositiveNumeric4" }
+        entered_accepted_qty: { $ref: "#/components/schemas/NonNegativeNumeric4" }
+        entered_rejected_qty: { $ref: "#/components/schemas/NonNegativeNumeric4" }
+        received_qty_base:
+          allOf:
+            - $ref: "#/components/schemas/NonNegativeNumeric4"
+          description: Optional client echo of normalized accepted + rejected; server-computed when omitted.
+        accepted_qty_base:
+          allOf:
+            - $ref: "#/components/schemas/NonNegativeNumeric4"
+          description: Optional client echo of normalized accepted quantity; server-computed when omitted.
+        rejected_qty_base:
+          allOf:
+            - $ref: "#/components/schemas/NonNegativeNumeric4"
+          description: Optional client echo of normalized rejected quantity; server-computed when omitted.
         batch_number: { type: string, maxLength: 80, nullable: false }
         manufactured_on: { type: string, format: date, nullable: true }
         expires_on: { type: string, format: date, nullable: true }
@@ -3549,22 +4083,31 @@ components:
           nullable: true
           description: Required for authorized shelf-life exception.
 
+    ReceiveLineDto:
+      type: object
+      required: [po_line_id, product_id, product_uom_id, entered_qty, entered_accepted_qty, entered_rejected_qty, received_qty_base, accepted_qty_base, rejected_qty_base, remaining_qty_base, batch_id]
+      properties:
+        po_line_id: { $ref: "#/components/schemas/Uuid" }
+        product_id: { $ref: "#/components/schemas/Uuid" }
+        product_uom_id: { $ref: "#/components/schemas/Uuid" }
+        entered_qty: { $ref: "#/components/schemas/PositiveNumeric4" }
+        entered_accepted_qty: { $ref: "#/components/schemas/NonNegativeNumeric4" }
+        entered_rejected_qty: { $ref: "#/components/schemas/NonNegativeNumeric4" }
+        received_qty_base: { $ref: "#/components/schemas/NonNegativeNumeric4" }
+        accepted_qty_base: { $ref: "#/components/schemas/NonNegativeNumeric4" }
+        rejected_qty_base: { $ref: "#/components/schemas/NonNegativeNumeric4" }
+        remaining_qty_base: { $ref: "#/components/schemas/NonNegativeNumeric4" }
+        batch_id: { $ref: "#/components/schemas/Uuid" }
+
     PurchaseReceiptResultDto:
       type: object
+      required: [inventory_txn_id, purchase_order_status, lines]
       properties:
         inventory_txn_id: { $ref: "#/components/schemas/Uuid" }
         purchase_order_status: { $ref: "#/components/schemas/PurchaseOrderStatus" }
         lines:
           type: array
-          items:
-            type: object
-            properties:
-              po_line_id: { $ref: "#/components/schemas/Uuid" }
-              product_id: { $ref: "#/components/schemas/Uuid" }
-              accepted_qty_base: { $ref: "#/components/schemas/Numeric4" }
-              rejected_qty_base: { $ref: "#/components/schemas/Numeric4" }
-              remaining_qty_base: { $ref: "#/components/schemas/Numeric4" }
-              batch_id: { $ref: "#/components/schemas/Uuid" }
+          items: { $ref: "#/components/schemas/ReceiveLineDto" }
         trace_id: { type: string }
 
     RecordSupplierPaymentRequest:
@@ -3576,7 +4119,10 @@ components:
       properties:
         supplier_id: { $ref: "#/components/schemas/Uuid" }
         purchase_order_id: { $ref: "#/components/schemas/Uuid" }
-        amount: { $ref: "#/components/schemas/Money", description: ">0 and <= outstanding" }
+        amount:
+          allOf:
+            - $ref: "#/components/schemas/PositiveMoney"
+          description: Must be >0 and <= outstanding PO balance
         currency_code: { type: string }
         method: { type: string, enum: [CASH] }
         payment_reference: { type: string, nullable: true, maxLength: 100 }
@@ -3584,6 +4130,7 @@ components:
 
     SupplierPaymentDto:
       type: object
+      required: [supplier_payment_id, supplier_id, purchase_order_id, amount, currency_code, method, paid_at, recorded_by_employee_id]
       properties:
         supplier_payment_id: { $ref: "#/components/schemas/Uuid" }
         supplier_id: { $ref: "#/components/schemas/Uuid" }
@@ -3605,18 +4152,20 @@ components:
 
     VendorReturnLineDto:
       type: object
+      required: [vendor_return_line_id, purchase_order_line_id, product_id, batch_id, location_id, quantity_base, unit_cost_snapshot]
       properties:
         vendor_return_line_id: { $ref: "#/components/schemas/Uuid" }
         purchase_order_line_id: { $ref: "#/components/schemas/Uuid" }
         product_id: { $ref: "#/components/schemas/Uuid" }
         batch_id: { $ref: "#/components/schemas/Uuid" }
         location_id: { $ref: "#/components/schemas/Uuid" }
-        quantity_base: { $ref: "#/components/schemas/Numeric4", description: ">0" }
-        unit_cost_snapshot: { $ref: "#/components/schemas/Numeric4" }
-        reason_code: { type: string, nullable: true, maxLength: 40 }
+        quantity_base: { $ref: "#/components/schemas/PositiveNumeric4" }
+        unit_cost_snapshot: { $ref: "#/components/schemas/NonNegativeNumeric4" }
+        reason_code: { type: string, maxLength: 40 }
 
     VendorReturnDto:
       type: object
+      required: [vendor_return_id, return_no, supplier_id, branch_id, created_by_employee_id, status, created_at, lines]
       properties:
         vendor_return_id: { $ref: "#/components/schemas/Uuid" }
         return_no: { type: string, maxLength: 40 }
@@ -3624,22 +4173,28 @@ components:
         branch_id: { $ref: "#/components/schemas/Uuid" }
         created_by_employee_id: { $ref: "#/components/schemas/Uuid" }
         status: { $ref: "#/components/schemas/VendorReturnStatus" }
-        reason_code: { type: string, nullable: true, maxLength: 40 }
+        reason_code: { type: string, maxLength: 40 }
         note: { type: string, nullable: true, maxLength: 500 }
         created_at: { $ref: "#/components/schemas/Timestamp" }
-        posted_at: { $ref: "#/components/schemas/Timestamp", nullable: true }
+        posted_at:
+          allOf:
+            - $ref: "#/components/schemas/Timestamp"
+          nullable: true
         lines:
           type: array
           items: { $ref: "#/components/schemas/VendorReturnLineDto" }
-        inventory_txn: { $ref: "#/components/schemas/InventoryTxnDto", nullable: true }
+        inventory_txn:
+          allOf:
+            - $ref: "#/components/schemas/InventoryTxnDto"
+          nullable: true
 
     CreateVendorReturnRequest:
       type: object
-      required: [supplier_id, branch_id, lines]
+      required: [supplier_id, branch_id, reason_code, lines]
       properties:
         supplier_id: { $ref: "#/components/schemas/Uuid" }
         branch_id: { $ref: "#/components/schemas/Uuid" }
-        reason_code: { type: string, nullable: true, maxLength: 40 }
+        reason_code: { type: string, maxLength: 40 }
         note: { type: string, nullable: true, maxLength: 500 }
         lines:
           type: array
@@ -3648,13 +4203,13 @@ components:
 
     VendorReturnLineRequest:
       type: object
-      required: [purchase_order_line_id, batch_id, location_id, quantity_base]
+      required: [purchase_order_line_id, batch_id, location_id, quantity_base, reason_code]
       properties:
         purchase_order_line_id: { $ref: "#/components/schemas/Uuid" }
         batch_id: { $ref: "#/components/schemas/Uuid" }
         location_id: { $ref: "#/components/schemas/Uuid" }
-        quantity_base: { $ref: "#/components/schemas/Numeric4" }
-        reason_code: { type: string, nullable: true, maxLength: 40 }
+        quantity_base: { $ref: "#/components/schemas/PositiveNumeric4" }
+        reason_code: { type: string, maxLength: 40 }
 
     # -------------------------------------------------------------------------
     # Paged specialized (items + nextCursor pattern)

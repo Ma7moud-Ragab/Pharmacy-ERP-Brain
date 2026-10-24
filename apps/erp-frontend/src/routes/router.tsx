@@ -7,6 +7,7 @@
 
 import { createBrowserRouter, type RouteObject } from 'react-router-dom';
 import { ProtectedRoute } from './ProtectedRoute';
+import { PublicOnlyRoute } from './PublicOnlyRoute';
 import { PATHS } from './paths';
 import { LoginPage } from '../features/auth/pages/LoginPage';
 import { DashboardPage } from '../features/dashboard/pages/DashboardPage';
@@ -14,7 +15,11 @@ import { DashboardPage } from '../features/dashboard/pages/DashboardPage';
 export const routes: RouteObject[] = [
   {
     path: PATHS.LOGIN,
-    element: <LoginPage />,
+    element: (
+      <PublicOnlyRoute>
+        <LoginPage />
+      </PublicOnlyRoute>
+    ),
   },
   {
     path: PATHS.HOME,

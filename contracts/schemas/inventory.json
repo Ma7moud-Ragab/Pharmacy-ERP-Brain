@@ -7,8 +7,8 @@
   "$defs": {
     "LocationType": {
       "type": "string",
-      "enum": ["SELLABLE", "QUARANTINE", "DAMAGED", "SCRAP"],
-      "description": "is_sellable=true is permitted only for SELLABLE; the other three are always non-sellable."
+      "enum": ["SELLABLE", "QUARANTINE", "SCRAP"],
+      "description": "is_sellable=true is permitted only for SELLABLE; QUARANTINE and SCRAP are always non-sellable. Damaged stock is tracked via batch quality_status=QUARANTINED in a quarantined batch location, not a separate location type."
     },
     "BatchQualityStatus": {
       "type": "string",
@@ -70,9 +70,9 @@
         "branch_id": { "type": "string", "format": "uuid" },
         "location_id": { "type": "string", "format": "uuid" },
         "batch_id": { "type": "string", "format": "uuid" },
-        "on_hand_qty_base": { "$ref": "common.json#/$defs/Numeric4", "description": ">=0 always." },
-        "average_unit_cost": { "$ref": "common.json#/$defs/Numeric4", "description": "Location-and-batch weighted average (>=0)." },
-        "available_qty_base": { "$ref": "common.json#/$defs/Numeric4", "description": "Server-derived eligible stock; equals on_hand in MVP because there are no reservations." },
+        "on_hand_qty_base": { "$ref": "common.json#/$defs/NonNegativeNumeric4", "description": "Always >= 0." },
+        "average_unit_cost": { "$ref": "common.json#/$defs/NonNegativeNumeric4", "description": "Location-and-batch weighted average (>=0)." },
+        "available_qty_base": { "$ref": "common.json#/$defs/NonNegativeNumeric4", "description": "Server-derived eligible quantity: sum of on_hand from SELLABLE locations for batches that are AVAILABLE, not expired by business date, and not recalled. With no reservations in MVP this normally equals eligible on_hand, not raw on_hand across all locations. Never negative." },
         "row_version": { "type": "integer", "readOnly": true, "description": "Optimistic concurrency token." },
         "updated_at": { "$ref": "common.json#/$defs/Timestamp" }
       }
@@ -106,10 +106,10 @@
         "location_id": { "type": "string", "format": "uuid" },
         "batch_id": { "type": "string", "format": "uuid", "description": "NOT NULL; NON-LOT sentinel for non-lot-tracked products." },
         "product_uom_id": { "type": "string", "format": "uuid", "description": "Product's BASE UOM for ledger lines." },
-        "entered_qty": { "$ref": "common.json#/$defs/Numeric4", "description": "= abs(quantity_delta_base) on ledger lines." },
-        "conversion_snapshot": { "$ref": "common.json#/$defs/Numeric6", "description": "= 1 on ledger lines." },
+        "entered_qty": { "$ref": "common.json#/$defs/PositiveNumeric4", "description": "= abs(quantity_delta_base) on ledger lines; strictly positive." },
+        "conversion_snapshot": { "$ref": "common.json#/$defs/PositiveNumeric6", "description": "= 1 on ledger lines; conversion must be >0." },
         "quantity_delta_base": { "$ref": "common.json#/$defs/Numeric4", "description": "Signed; never 0." },
-        "unit_cost_base": { "$ref": "common.json#/$defs/Numeric4" },
+        "unit_cost_base": { "$ref": "common.json#/$defs/NonNegativeNumeric4", "description": ">= 0." },
         "sales_order_line_id": { "type": ["string", "null"], "format": "uuid" },
         "sales_return_line_id": { "type": ["string", "null"], "format": "uuid" },
         "purchase_order_line_id": { "type": ["string", "null"], "format": "uuid" },
@@ -146,22 +146,36 @@
         "location_id": { "type": "string", "format": "uuid" },
         "batch_id": { "type": "string", "format": "uuid", "description": "Use the system NON-LOT batch (get its id from /inventory/batches) for non-lot-tracked products." },
         "product_uom_id": { "type": "string", "format": "uuid" },
-        "entered_qty": { "$ref": "common.json#/$defs/Numeric4", "description": ">0 in the entered UOM." },
-        "unit_cost_base": { "$ref": "common.json#/$defs/Numeric4", "description": "REQUIRED for ADJUSTMENT_IN / OPENING_BALANCE. Omitted for ADJUSTMENT_OUT; the server uses the current balance cost. Reversals/RESTOCK reuse the original posted cost." }
+        "entered_qty": { "$ref": "common.json#/$defs/PositiveNumeric4", "description": ">0 in the entered UOM." },
+        "unit_cost_base": { "$ref": "common.json#/$defs/NonNegativeNumeric4", "description": "REQUIRED for ADJUSTMENT_IN / OPENING_BALANCE. Omitted for ADJUSTMENT_OUT; the server uses the current balance cost. Reversals/RESTOCK reuse the original posted cost. Never negative." }
       }
     },
     "InventoryTxnRequest": {
       "type": "object",
-      "required": ["transaction_type", "branch_id", "lines"],
+      "required": ["transaction_type", "branch_id", "reason_code", "lines"],
       "properties": {
         "transaction_type": {
-          "allOf": [{ "$ref": "#/$defs/InventoryTxnType" }],
-          "description": "Permissible for /inventory/adjustments: OPENING_BALANCE, ADJUSTMENT_IN, ADJUSTMENT_OUT, REVERSAL."
+          "type": "string",
+          "enum": ["OPENING_BALANCE", "ADJUSTMENT_IN", "ADJUSTMENT_OUT", "REVERSAL"],
+          "description": "Adjustment endpoint only. Ledger-generated types (SALE_ISSUE, SALES_RETURN_IN, PURCHASE_RECEIPT, VENDOR_RETURN_OUT, SCRAP_OUT) are server-created by their owning workflows and cannot be posted here."
         },
         "branch_id": { "type": "string", "format": "uuid" },
-        "reason_code": { "type": ["string", "null"], "maxLength": 40 },
+        "reason_code": { "type": "string", "maxLength": 40 },
         "note": { "type": ["string", "null"], "maxLength": 500 },
-        "reverses_inventory_txn_id": { "type": ["string", "null"], "format": "uuid", "description": "REQUIRED when transaction_type=REVERSAL." },
+        "reverses_inventory_txn_id": { "type": ["string", "null"], "format": "uuid", "description": "REQUIRED when transaction_type=REVERSAL; must reference a POSTED transaction in the same branch." },
+        "lines": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/InventoryTxnLineRequest" }
+        }
+      }
+    },
+    "InventoryTxnPatchRequest": {
+      "type": "object",
+      "description": "Partial edit for a DRAFT adjustment only. transaction_type, branch_id, and reverses_inventory_txn_id are immutable after creation. Posted transactions are immutable and must be corrected by a new REVERSAL.",
+      "properties": {
+        "reason_code": { "type": "string", "maxLength": 40 },
+        "note": { "type": ["string", "null"], "maxLength": 500 },
         "lines": {
           "type": "array",
           "minItems": 1,

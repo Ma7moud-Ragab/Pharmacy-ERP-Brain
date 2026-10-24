@@ -1,0 +1,215 @@
+erDiagram
+    rule_config {
+        uuid id PK
+        uuid tenant_id
+        text rule_set
+        int version
+        text version_label
+        jsonb params
+        bool is_active
+        timestamptz effective_from
+        text created_by
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    training_run {
+        uuid id PK
+        uuid tenant_id
+        text purpose
+        text trigger
+        text status
+        timestamptz started_at
+        timestamptz finished_at
+        int products_requested
+        int products_trained
+        int products_skipped
+        int products_failed
+        smallint feature_set_version
+        uuid rule_config_id FK
+        text code_version
+        jsonb config_snapshot
+        text error_summary
+        char trace_id
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    model_registry {
+        uuid id PK
+        uuid tenant_id
+        uuid product_id
+        text scope
+        uuid shared_model_id FK
+        text purpose
+        text model_family
+        text model_version
+        text status
+        uuid training_run_id FK
+        smallint feature_set_version
+        timestamptz trained_at
+        date train_data_start
+        date train_data_end
+        jsonb hyperparameters
+        numeric backtest_wape
+        numeric baseline_wape
+        jsonb metrics
+        text artifact_path
+        text artifact_format
+        char artifact_sha256
+        bigint artifact_size_bytes
+        text code_version
+        timestamptz validated_at
+        timestamptz degraded_at
+        timestamptz retired_at
+        text status_reason
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    model_evaluation {
+        uuid id PK
+        uuid tenant_id
+        uuid model_id FK
+        text evaluation_type
+        text metric_name
+        numeric metric_value
+        numeric baseline_value
+        int n_obs
+        date window_start
+        date window_end
+        timestamptz evaluated_at
+        jsonb details
+    }
+    forecast {
+        uuid id PK
+        uuid tenant_id
+        uuid product_id
+        uuid model_id FK
+        uuid job_run_id
+        date origin_date
+        timestamptz generated_at
+        smallint horizon_days
+        text trigger
+        text forecast_confidence
+        bool cold_start
+        int history_days
+        text interval_method
+        numeric interval_coverage
+        smallint feature_set_version
+        timestamptz inputs_max_updated_at
+        text_array quality_flags
+        jsonb factors
+        char trace_id
+        timestamptz created_at
+    }
+    forecast_point {
+        uuid forecast_id PK, FK
+        uuid tenant_id
+        date target_date PK
+        numeric predicted_demand
+        numeric confidence_low
+        numeric confidence_high
+    }
+    anomaly_event {
+        uuid id PK
+        uuid tenant_id
+        uuid product_id
+        date observation_date
+        text anomaly_type
+        text detection_method
+        numeric expected_value
+        numeric observed_value
+        numeric zscore
+        numeric score
+        text severity
+        jsonb reasons
+        text rule_version
+        uuid rule_config_id FK
+        uuid model_id FK
+        uuid forecast_id FK
+        text status
+        text reviewed_by
+        timestamptz reviewed_at
+        timestamptz first_detected_at
+        timestamptz last_detected_at
+        int detection_count
+        int row_version
+        char trace_id
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    risk_assessment {
+        uuid id PK
+        uuid tenant_id
+        uuid product_id
+        uuid supplier_id
+        text risk_type
+        text severity
+        numeric confidence
+        numeric input_available_quantity
+        timestamptz inventory_as_of
+        text inventory_source
+        numeric demand_per_day
+        numeric demand_over_lead_time
+        numeric demand_over_lead_time_upper
+        numeric days_of_cover
+        numeric lead_time_days
+        timestamptz supplier_as_of
+        uuid forecast_id FK
+        uuid anomaly_event_id FK
+        text rule_version
+        uuid rule_config_id FK
+        jsonb calculation
+        timestamptz calculated_at
+        timestamptz last_confirmed_at
+        timestamptz superseded_at
+        uuid superseded_by_id FK
+        char trace_id
+    }
+    recommendation {
+        uuid id PK
+        uuid tenant_id
+        uuid product_id
+        uuid supplier_id
+        uuid risk_assessment_id FK
+        uuid forecast_id FK
+        text recommendation_type
+        jsonb payload
+        jsonb calculation
+        text status
+        timestamptz generated_at
+        timestamptz expires_at
+        timestamptz superseded_at
+        uuid superseded_by_id FK
+        text rule_version
+        uuid rule_config_id FK
+        int row_version
+        char trace_id
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    canonical_cache {
+        uuid id PK
+    }
+    feature_daily {
+        uuid tenant_id PK
+        uuid product_id PK
+        date feature_date PK
+    }
+    rule_config |o--o{ training_run : "rule_config"
+    training_run ||--o{ model_registry : "training_run"
+    model_registry |o--o{ model_registry : "shared_model"
+    model_registry ||--o{ model_evaluation : "model"
+    model_registry ||--o{ forecast : "model"
+    forecast ||--o{ forecast_point : "forecast"
+    rule_config ||--o{ anomaly_event : "rule_config"
+    model_registry |o--o{ anomaly_event : "model"
+    forecast |o--o{ anomaly_event : "forecast"
+    forecast |o--o{ risk_assessment : "forecast"
+    anomaly_event |o--o{ risk_assessment : "anomaly_event"
+    rule_config ||--o{ risk_assessment : "rule_config"
+    risk_assessment |o--o{ risk_assessment : "superseded_by"
+    risk_assessment ||--o{ recommendation : "risk_assessment"
+    forecast |o--o{ recommendation : "forecast"
+    rule_config ||--o{ recommendation : "rule_config"
+    recommendation |o--o{ recommendation : "superseded_by"
+    feature_daily ||..o{ forecast : "logical inputs"
+    canonical_cache ||..o{ risk_assessment : "logical inputs"

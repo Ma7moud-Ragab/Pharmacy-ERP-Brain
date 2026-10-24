@@ -1,5 +1,10 @@
 /**
- * Pharmacy ERP — Shared Contract Primitives (mirrors schemas/common.json)
+ * Pharmacy ERP — Shared Contract Primitives.
+ *
+ * Source of truth: /contracts/openapi.erp.yaml (components.schemas).
+ * These type aliases are derived from the generated OpenAPI types so the FE
+ * can never drift from the contract. Re-run `npm run codegen:paths` after any
+ * contract change.
  *
  * CRITICAL NOTE ON NUMBERS:
  *   Money / quantities / costs / tax rates / conversion factors are serialized
@@ -8,52 +13,42 @@
  *   authoritative for all totals. Parse to decimal lib (e.g. decimal.js) only
  *   for display.
  */
+import type { components } from './api-paths';
 
-export type Uuid = string;
-/** numeric(18,2) — fixed-2 decimal string */
-export type Money = string;
+type Schemas = components['schemas'];
+
+// ---------------------------------------------------------------------------
+// Scalar conventions
+// ---------------------------------------------------------------------------
+
+export type Uuid = Schemas['Uuid'];
+/** numeric(18,2) — fixed-2 decimal string (non-negative) */
+export type Money = Schemas['Money'];
 /** numeric(18,4) — fixed-4 decimal string (quantities, unit costs) */
-export type Numeric4 = string;
+export type Numeric4 = Schemas['Numeric4'];
 /** numeric(18,6) — fixed-6 decimal string (conversion factors) */
-export type Numeric6 = string;
+export type Numeric6 = Schemas['Numeric6'];
 /** numeric(9,4) fractional rate: "0.1400" = 14% (NOT 14) */
-export type TaxRate = string;
+export type TaxRate = Schemas['TaxRate'];
 /** UTC ISO-8601 timestamptz */
-export type Timestamp = string;
+export type Timestamp = Schemas['Timestamp'];
 /** Business date, organization-timezone-derived */
 export type BusinessDate = string; // "YYYY-MM-DD"
 
-export interface AddressDto {
-  line1: string;
-  line2: string | null;
-  city: string;
-  region: string | null;
-  postal_code: string | null;
-  country_code: string; // "EG"
-}
+// ---------------------------------------------------------------------------
+// Shared value objects
+// ---------------------------------------------------------------------------
+
+export type AddressDto = Schemas['AddressDto'];
 
 // ---------------------------------------------------------------------------
 // Auth vocabulary (case-sensitive closed sets)
 // ---------------------------------------------------------------------------
 
-export type Role = 'Admin' | 'Pharmacist' | 'Cashier';
-export type BranchScope = 'ALL' | 'ASSIGNED';
-export type RuntimeMode = 'Cloud' | 'BranchLocal';
-
-export type PermissionScope =
-  | 'inventory:read'
-  | 'inventory:write'
-  | 'sales:read'
-  | 'sales:write'
-  | 'return:read'
-  | 'return:write'
-  | 'purchase-order:read'
-  | 'purchase-order:draft'
-  | 'purchase-order:approve'
-  | 'purchase-order:receive'
-  | 'supplier-payment:write'
-  | 'sync:retry'
-  | 'user:admin';
+export type Role = Schemas['Role'];
+export type BranchScope = Schemas['BranchScope'];
+export type RuntimeMode = Schemas['RuntimeMode'];
+export type PermissionScope = Schemas['PermissionScope'];
 
 /** JWT claims shape (verified payload) — §8.5 */
 export interface JwtClaims {
@@ -82,7 +77,8 @@ export type ApiErrorCodeConflicts =
   | 'CONFLICT' // 409
   | 'INVALID_STATE_TRANSITION' // 409
   | 'OUT_OF_STOCK' // 409
-  | 'IDEMPOTENCY_MISMATCH'; // 409
+  | 'IDEMPOTENCY_MISMATCH' // 409
+  | 'GONE'; // 410 (expired/consumed enrollment token)
 
 export type ApiErrorCodeValidations =
   | 'VALIDATION_ERROR' // 422
@@ -99,14 +95,7 @@ export interface ApiErrorDetail {
   issue: string;
 }
 
-export interface ApiError {
-  error: {
-    code: ApiErrorCodeAll;
-    message: string;
-    details?: ApiErrorDetail[];
-    trace_id: string; // matches the W3C traceparent sent on the call
-  };
-}
+export type ApiError = Schemas['ApiError'];
 
 /** 409 with per-line stock detail on checkout */
 export interface OutOfStockError extends ApiError {

@@ -1,37 +1,38 @@
-import { useNavigate } from 'react-router-dom';
-import { useAuthStore } from '../../../stores/authStore';
-import { PATHS } from '../../../routes/paths';
+import { ShieldCheck } from 'lucide-react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { LoginForm } from '../components/LoginForm';
+import { resolveRedirectPath } from '../../../routes/paths';
 
 export function LoginPage() {
-  const login = useAuthStore((state) => state.login);
+  const location = useLocation();
   const navigate = useNavigate();
 
-  const handleQuickLogin = async () => {
-    await login({
-      organization_code: 'PHARMAPLUS',
-      username: 'fa.pharmacist',
-      password: 'password123',
-    });
-    navigate(PATHS.HOME);
+  const handleSuccess = () => {
+    navigate(resolveRedirectPath(location.state), { replace: true });
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-slate-900 p-4 text-white">
-      <div className="w-full max-w-sm rounded-xl border border-slate-800 bg-slate-950 p-6 text-center shadow-xl">
-        <h1 className="text-2xl font-bold text-emerald-400">
-          Login Screen Stub
-        </h1>
-        <p className="mt-2 text-sm text-slate-400">
-          Enter credentials or click below for MSW fixture login
+    <main className="bg-background flex min-h-screen items-center justify-center px-4 py-10">
+      <div className="w-full max-w-[400px]">
+        <div className="border-border bg-surface rounded-lg border p-6 shadow-md sm:p-8">
+          <div className="mb-6 flex flex-col items-center gap-3 text-center">
+            <span className="bg-primary-soft text-primary flex h-11 w-11 items-center justify-center rounded-md">
+              <ShieldCheck className="h-6 w-6" aria-hidden="true" />
+            </span>
+            <div>
+              <h1 className="text-display text-text">Sign in</h1>
+              <p className="text-body text-text-secondary mt-1">
+                Access your pharmacy workspace.
+              </p>
+            </div>
+          </div>
+          <LoginForm onSuccess={handleSuccess} />
+        </div>
+        <p className="text-caption text-text-muted mt-4 text-center">
+          ForgeERP · Secure session access
         </p>
-        <button
-          onClick={() => void handleQuickLogin()}
-          className="mt-6 w-full cursor-pointer rounded-lg bg-emerald-600 px-4 py-2 font-medium text-white transition hover:bg-emerald-500"
-        >
-          Sign In (Demo / MSW)
-        </button>
       </div>
-    </div>
+    </main>
   );
 }
 

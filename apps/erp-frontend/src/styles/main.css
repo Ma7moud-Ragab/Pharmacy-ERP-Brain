@@ -1,1 +1,57 @@
 @import 'tailwindcss';
+
+@theme {
+  --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+
+  --color-primary: #2563eb;
+  --color-primary-hover: #1d4ed8;
+  --color-primary-soft: #eff6ff;
+  --color-ai: #6d5bd0;
+  --color-ai-soft: #f2efff;
+  --color-sidebar: #101827;
+  --color-sidebar-muted: #9ba7ba;
+  --color-background: #f6f7f9;
+  --color-surface: #ffffff;
+  --color-border: #e2e6ec;
+  --color-border-strong: #cdd3dc;
+  --color-text: #172033;
+  --color-text-secondary: #5e6879;
+  --color-text-muted: #8b94a3;
+  --color-success: #15803d;
+  --color-success-soft: #ecfdf3;
+  --color-warning: #b45309;
+  --color-warning-soft: #fff7ed;
+  --color-danger: #c2413b;
+  --color-danger-soft: #fef2f2;
+  --color-info: #0369a1;
+  --color-info-soft: #f0f9ff;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.04);
+  --shadow-md: 0 8px 24px rgba(16, 24, 40, 0.1);
+  --shadow-lg: 0 20px 48px rgba(16, 24, 40, 0.16);
+
+  --text-display: 25px;
+  --text-display--line-height: 1.25;
+  --text-display--font-weight: 700;
+  --text-title: 15px;
+  --text-title--font-weight: 700;
+  --text-card-title: 13px;
+  --text-card-title--font-weight: 700;
+  --text-body: 12px;
+  --text-body-sm: 10px;
+  --text-caption: 9px;
+  --text-micro: 8px;
+}
+
+@layer base {
+  body {
+    background-color: var(--color-background);
+    color: var(--color-text);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+}

@@ -16,10 +16,10 @@
         "order_line_id": { "type": "string", "format": "uuid" },
         "product_id": { "type": "string", "format": "uuid" },
         "product_uom_id": { "type": "string", "format": "uuid" },
-        "entered_qty": { "$ref": "common.json#/$defs/Numeric4" },
-        "conversion_snapshot": { "$ref": "common.json#/$defs/Numeric6" },
-        "quantity_base": { "$ref": "common.json#/$defs/Numeric4" },
-        "unit_price_snapshot": { "$ref": "common.json#/$defs/Numeric4", "description": "Per entered UOM; server-copied." },
+        "entered_qty": { "$ref": "common.json#/$defs/PositiveNumeric4" },
+        "conversion_snapshot": { "$ref": "common.json#/$defs/PositiveNumeric6" },
+        "quantity_base": { "$ref": "common.json#/$defs/PositiveNumeric4" },
+        "unit_price_snapshot": { "$ref": "common.json#/$defs/NonNegativeNumeric4", "description": "Per entered UOM; server-copied." },
         "discount_amount": { "$ref": "common.json#/$defs/Money", "description": "Always 0 in MVP — clients cannot set discounts." },
         "tax_rate_snapshot": { "$ref": "common.json#/$defs/TaxRate", "description": "Fractional snapshot of PRODUCT.tax_rate." },
         "tax_amount_snapshot": { "$ref": "common.json#/$defs/Money" },
@@ -52,7 +52,7 @@
       "properties": {
         "product_id": { "type": "string", "format": "uuid" },
         "product_uom_id": { "type": "string", "format": "uuid" },
-        "entered_qty": { "$ref": "common.json#/$defs/Numeric4" }
+        "entered_qty": { "$ref": "common.json#/$defs/PositiveNumeric4" }
       }
     },
     "CreateSalesOrderRequest": {
@@ -84,7 +84,7 @@
       "description": "Branch-local. Atomic server operation: invoice + cash payment + FEFO stock issue + audit + sync outbox. Rejects partial payment / unpaid credit sales.",
       "required": ["cash_tendered_amount", "method"],
       "properties": {
-        "cash_tendered_amount": { "$ref": "common.json#/$defs/Money", "description": ">= payable total; change = tendered - due must be >= 0." },
+        "cash_tendered_amount": { "$ref": "common.json#/$defs/PositiveMoney", "description": ">0 and >= payable total; change = tendered - due must be >= 0." },
         "method": {
           "type": "string",
           "enum": ["CASH"],
@@ -121,16 +121,16 @@
         "source_order_line_id": { "type": "string", "format": "uuid" },
         "product_id": { "type": "string", "format": "uuid" },
         "product_uom_id": { "type": "string", "format": "uuid" },
-        "entered_qty": { "$ref": "common.json#/$defs/Numeric4" },
-        "conversion_snapshot": { "$ref": "common.json#/$defs/Numeric6" },
-        "quantity_base": { "$ref": "common.json#/$defs/Numeric4" },
-        "unit_price_snapshot": { "$ref": "common.json#/$defs/Numeric4" },
+        "entered_qty": { "$ref": "common.json#/$defs/PositiveNumeric4" },
+        "conversion_snapshot": { "$ref": "common.json#/$defs/PositiveNumeric6" },
+        "quantity_base": { "$ref": "common.json#/$defs/PositiveNumeric4" },
+        "unit_price_snapshot": { "$ref": "common.json#/$defs/NonNegativeNumeric4" },
         "discount_amount": { "$ref": "common.json#/$defs/Money" },
         "tax_rate_snapshot": { "$ref": "common.json#/$defs/TaxRate" },
         "tax_amount_snapshot": { "$ref": "common.json#/$defs/Money" },
         "net_amount": { "$ref": "common.json#/$defs/Money", "description": "tax-exclusive." },
         "line_total": { "$ref": "common.json#/$defs/Money", "description": "tax-inclusive; the refundable base." },
-        "unit_cost_snapshot": { "$ref": "common.json#/$defs/Numeric4" }
+        "unit_cost_snapshot": { "$ref": "common.json#/$defs/NonNegativeNumeric4" }
       }
     },
     "SalesInvoiceDto": {
@@ -180,7 +180,7 @@
       "description": "FE does NOT choose batch_id or destination_location_id — the server derives them from the original SALE_ISSUE allocation and rejects over-returns.",
       "properties": {
         "invoice_line_id": { "type": "string", "format": "uuid" },
-        "quantity_base": { "$ref": "common.json#/$defs/Numeric4", "description": "<= remaining sold quantity for that invoice line." },
+        "quantity_base": { "$ref": "common.json#/$defs/PositiveNumeric4", "description": "<= remaining sold quantity for that invoice line." },
         "disposition": { "$ref": "#/$defs/ReturnDisposition" }
       }
     },
@@ -213,7 +213,7 @@
         "product_id": { "type": "string", "format": "uuid" },
         "batch_id": { "type": "string", "format": "uuid", "description": "Server-derived from the original posted sale allocation." },
         "destination_location_id": { "type": "string", "format": "uuid", "description": "Server-selected (source sale location if SELLABLE, else branch default of the disposition type)." },
-        "quantity_base": { "$ref": "common.json#/$defs/Numeric4" },
+        "quantity_base": { "$ref": "common.json#/$defs/PositiveNumeric4" },
         "refund_amount": { "$ref": "common.json#/$defs/Money", "description": "Proportional share of the original tax-inclusive line_total; residual-cent rules apply." },
         "disposition": { "$ref": "#/$defs/ReturnDisposition" }
       }
@@ -233,21 +233,26 @@
     },
     "SalesReturnDto": {
       "type": "object",
-      "required": ["return_id", "invoice_id", "branch_id", "return_no", "status", "refund_amount", "refund_status", "received_by_employee_id", "received_at", "lines"],
+      "required": ["return_id", "invoice_id", "branch_id", "return_no", "status", "reason_code", "refund_amount", "refund_status", "received_by_employee_id", "received_at", "lines"],
       "properties": {
         "return_id": { "type": "string", "format": "uuid" },
         "invoice_id": { "type": "string", "format": "uuid" },
         "branch_id": { "type": "string", "format": "uuid" },
         "return_no": { "type": "string", "maxLength": 40 },
         "status": { "$ref": "#/$defs/SalesReturnStatus" },
-        "reason_code": { "type": ["string", "null"], "maxLength": 40 },
+        "reason_code": { "type": "string", "maxLength": 40 },
         "refund_amount": { "$ref": "common.json#/$defs/Money" },
         "refund_status": { "$ref": "#/$defs/SalesRefundStatus" },
         "received_by_employee_id": { "type": "string", "format": "uuid" },
         "approved_by_employee_id": { "type": ["string", "null"], "format": "uuid" },
         "received_at": { "$ref": "common.json#/$defs/Timestamp" },
         "lines": { "type": "array", "items": { "$ref": "#/$defs/SalesReturnLineDto" } },
-        "inventory_txn": { "$ref": "inventory.json#/$defs/InventoryTxnDto", "description": "SALES_RETURN_IN stock receipt (+ linked SCRAP_OUT when disposition=SCRAP)." },
+        "inventory_txns": {
+          "type": "array",
+          "maxItems": 2,
+          "description": "Zero transactions for a non-restocking return, one SALES_RETURN_IN when stock is restocked/quarantined, and up to two when RESTOCK plus an additional SCRAP_OUT is required. Server-created only.",
+          "items": { "$ref": "inventory.json#/$defs/InventoryTxnDto" }
+        },
         "refund": { "$ref": "#/$defs/SalesRefundDto" }
       }
     }

@@ -1,41 +1,38 @@
-using Microsoft.EntityFrameworkCore;
-using Microsoft.OpenApi;
-using PharmacyERP.Infrastructure.Persistence.Database;
 
-var builder = WebApplication.CreateBuilder(args);
+using PharmacyERP.Api.Middleware;
+using PharmacyERP.Application;
+using PharmacyERP.Infrastructure;
 
-// Add services to the container.
-var connectionString = builder.Configuration.GetConnectionString("DefaultConnection")
-    ?? throw new InvalidOperationException("Connection string 'DefaultConnection' was not found.");
 
-builder.Services.AddDbContext<PharmacyDbContext>(options => options.UseSqlServer(connectionString));
-builder.Services.AddControllers();
-builder.Services.AddSwaggerGen(options =>
+namespace PharmacyERP.Api
 {
-    options.SwaggerDoc("v1", new OpenApiInfo
+    public class Program
     {
-        Title = "Pharmacy ERP API",
-        Version = "v1"
-    });
-});
+        public static void Main(string[] args)
+        {
+            var builder = WebApplication.CreateBuilder(args);
 
-var app = builder.Build();
+            builder.Services.AddApplicationServices();
+            builder.Services.AddInfrastructureServices(builder.Configuration);
+            builder.Services.AddApiServices();
 
-// Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
-{
-    app.UseSwagger();
-    app.UseSwaggerUI(options =>
-    {
-        options.SwaggerEndpoint("/swagger/v1/swagger.json", "Pharmacy ERP API v1");
-    });
+            var app = builder.Build();
+
+
+
+            if (app.Environment.IsDevelopment())
+            {
+                app.UseSwagger();
+                app.UseSwaggerUI(options =>
+                {
+                    options.SwaggerEndpoint("/swagger/v1/swagger.json", "Pharmacy ERP API v1");
+                });
+            }
+            app.UsePharmacyErpMiddlewares();
+
+            app.MapControllers();
+
+            app.Run();
+        }
+    }
 }
-
-app.UseHttpsRedirection();
-
-app.UseAuthorization();
-
-app.MapControllers();
-
-app.Run();
-

@@ -71,14 +71,16 @@ describe('Phase 0 Contract Fixtures Type Conformance', () => {
       salesInvoiceCompletedFixture as SalesInvoiceDto;
     expect(invoice.status).toBe('ISSUED');
     expect(invoice.payment_status).toBe('PAID');
-    expect(invoice.payments.length).toBeGreaterThan(0);
-    expect(invoice.payments[0].method).toBe('CASH');
+    expect(invoice.payments?.length).toBeGreaterThan(0);
+    expect(invoice.payments?.[0].method).toBe('CASH');
   });
 
   it('sales-return.json conforms to SalesReturnDto', () => {
     const returnDoc: SalesReturnDto = salesReturnFixture as SalesReturnDto;
     expect(returnDoc.status).toBe('POSTED');
-    expect(returnDoc.inventory_txn?.transaction_type).toBe('SALES_RETURN_IN');
+    expect(returnDoc.inventory_txns?.[0]?.transaction_type).toBe(
+      'SALES_RETURN_IN'
+    );
     expect(returnDoc.refund?.method).toBe('CASH');
   });
 

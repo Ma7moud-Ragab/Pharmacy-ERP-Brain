@@ -22,7 +22,8 @@
       "disposition": "RESTOCK"
     }
   ],
-  "inventory_txn": {
+  "inventory_txns": [
+    {
     "inventory_txn_id": "bc23de45-6262-4f8d-9b8c-ad0e1f2fdd12",
     "branch_id": "d4e5f6a7-3333-4c44-9d55-bbccddeeffaa",
     "transaction_no": "TXN-2026-001780",
@@ -54,7 +55,8 @@
         "vendor_return_line_id": null
       }
     ]
-  },
+    }
+  ],
   "refund": {
     "refund_id": "bc23de45-6161-4f7c-8a7b-9c0d1e2fdd11",
     "sales_return_id": "ab12cd34-5050-4e5a-8b6c-7a8b9c0dcd09",

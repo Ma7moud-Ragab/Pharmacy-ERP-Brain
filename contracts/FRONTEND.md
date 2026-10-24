@@ -9,12 +9,13 @@ counterpart of the backend's Phase-0 "Contracts & Mocks" deliverable.
 
 | Path | Contents |
 |---|---|
-| `openapi.erp.yaml` | Master OpenAPI 3.0.3 — 56 paths / 79 operations, all FE-facing ERP routes, Stages 1+2+3, with `x-runtime` (`Cloud`/`BranchLocal`/`Both`) and `x-stage` (`1`/`2`/`3`) on every operation |
+| `openapi.erp.yaml` | ERP Frontend/POS OpenAPI 3.0.3 — 56 paths / 79 operations, Stages 1+2+3, with `x-runtime` (`Cloud`/`BranchLocal`/`Both`) and `x-stage` (`1`/`2`/`3`) on every operation. Canonical and sync boundaries are separate contracts. |
 | `schemas/*.json` | Standalone JSON Schema (draft 2020-12) DTO definitions: `common`, `auth`, `identity`, `catalog`, `inventory`, `sales`, `purchasing` |
 | *generated types* | Generated client types are emitted to `apps/erp-frontend/src/types/generated` — **NOT** stored in this package (there is no `contracts/types/`) |
 
-Validation status: every `$ref` resolves, sizes/precision conventions checked,
-`tsc --strict` clean.
+Validation status: OpenAPI 3.0.3 schema validation passes, every `$ref`
+resolves, operationIds are unique, and protected operations carry RBAC
+metadata plus 401/403 responses.
 
 ## Client type generation
 
@@ -43,11 +44,17 @@ Client types are generated from this package and written to
 
 | Feature area | Cloud | BranchLocal |
 |---|---|---|
-| Auth, users, employees, branches, catalog, inventory adjustments | ✅ | ✅ (branch-scoped, local DB) |
-| Sales orders / invoices / returns (Stage 2) | ❌ (read projections only) | ✅ (POS write path) |
-| Suppliers, PO create/approve/order, supplier payments (Stage 3) | ✅ | ❌ |
+| Auth, users, employees, branch administration | ✅ | ❌ |
+| Catalog/reorder reads | ✅ | ✅ |
+| Catalog/reorder writes | ✅ | ❌ |
+| Inventory locations/batches/balances/ledger reads | ✅ | ✅ |
+| Inventory adjustments/opening balances | ❌ | ✅ |
+| Sales orders / invoices / returns (Stage 2) | ❌ | ✅ (POS write path) |
+| Supplier/PO reads | ✅ | ✅ |
+| Supplier/PO create/approve/order, supplier payments (Stage 3) | ✅ | ❌ |
 | PO receive, PO cancel-remaining | ❌ | ✅ |
-| Vendor returns create/cancel/post | read only | ✅ |
+| Vendor return reads | ✅ | ✅ |
+| Vendor returns create/cancel/post | ❌ | ✅ |
 
 > If the FE asks a runtime for a route it does not own, the server answers
 > **404/405**. Gate the UI on the declared `runtime` from `/auth/me`.
@@ -100,6 +107,7 @@ Client types are generated from this package and written to
 | FORBIDDEN / FORBIDDEN_BRANCH | 403 | hide/redirect UI; branch picker issue |
 | NOT_FOUND | 404 | stale local data; refresh list |
 | CONFLICT / INVALID_STATE_TRANSITION | 409 | re-fetch state, surface message |
+| GONE | 410 | enrollment token expired/consumed; restart enrollment |
 | OUT_OF_STOCK | 409 | show per-line shortages from `details` |
 | IDEMPOTENCY_MISMATCH | 409 | regenerate key for new payload |
 | VALIDATION_ERROR | 422 | map `details[].field` to form fields |

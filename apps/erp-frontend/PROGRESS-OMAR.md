@@ -30,15 +30,23 @@ Here is a detailed breakdown of what has been accomplished:
 * **The Forge AI Golden Rule:** No action proposed by the AI can *ever* be executed automatically. Every write-action must mandatorily pass through the `ApprovalModal` for explicit human confirmation.
 
 ### 6. Code Health & CI/CD Readiness
-* **Tests:** 30/30 Unit & Integration tests are passing (100% Success).
+* **Tests:** 48/48 Unit & Integration tests are passing (100% Success).
 * **Linting:** The codebase is pristine (0 Errors / 0 Warnings in ESLint).
-* **Performance:** Production build completes in ~1 second.
+* **Performance:** Production build completes in ~1.5 seconds.
+
+### 7. Login Experience & UI Foundation (Completed)
+* **Design Tokens:** `DESIGN.md` colors, radii, shadows and type scale are now live as Tailwind v4 `@theme` tokens.
+* **UI Primitives:** `Button`, `Input`, and a token-themed `ToastHost` are in place and reusable across features.
+* **Production Login:** The stub is replaced by a React Hook Form + Zod form with inline server-field errors, loading state, and React-Toastify success/error feedback.
+* **Safe Redirects:** `PublicOnlyRoute` plus an open-redirect-safe `resolveRedirectPath` return users to the page they originally requested.
+* **Manual QA:** MSW now simulates invalid credentials (any password equal to `invalid`).
 
 ---
 
 ### 🎯 Next Immediate Steps
-With a concrete foundation beneath us, our complete focus now shifts to the User Interface (UI):
-1. **UI Primitives:** Translate `DESIGN.md` into reusable React components using Tailwind v4 and Lucide (e.g., `Button`, `Input`, `Card`).
-2. **Production Login Page:** Replace the current login stub with the final, polished UI, utilizing `React Hook Form` and `Zod` for robust client-side validation.
+With authentication production-ready, focus shifts to the application shell and Stage 1 screens:
+1. **Query Infrastructure:** Add the shared `QueryClient` provider and typed query hooks for server state.
+2. **App Shell:** Implement `layouts/AppShell.tsx` (sidebar and top bar) using the new tokens and primitives.
+3. **Stage 1 Screens:** Start with Catalog and Inventory Ledger read views, gated by the `runtime` returned from `/auth/me`.
 
-Great job, everyone. Let's start building the interfaces!
+The foundation and login are behind us. Let's build the workspace!

@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { RouterProvider } from 'react-router-dom';
+import { ToastHost } from './components/ui/ToastHost';
 import { router } from './routes';
 import { useAuthStore } from './stores/authStore';
 
@@ -10,5 +11,10 @@ export default function App() {
     void initialize();
   }, [initialize]);
 
-  return <RouterProvider router={router} />;
+  return (
+    <>
+      <RouterProvider router={router} />
+      <ToastHost />
+    </>
+  );
 }

@@ -69,15 +69,15 @@
         "po_line_id": { "type": "string", "format": "uuid" },
         "product_id": { "type": "string", "format": "uuid" },
         "product_uom_id": { "type": "string", "format": "uuid" },
-        "entered_ordered_qty": { "$ref": "common.json#/$defs/Numeric4" },
-        "conversion_snapshot": { "$ref": "common.json#/$defs/Numeric6" },
-        "ordered_qty_base": { "$ref": "common.json#/$defs/Numeric4" },
-        "received_qty_base": { "$ref": "common.json#/$defs/Numeric4", "description": "Cumulative ACCEPTED quantity only (rejected excluded)." },
-        "rejected_qty_base": { "$ref": "common.json#/$defs/Numeric4", "description": "Visible, replaceable; does not reduce the obligation." },
-        "cancelled_qty_base": { "$ref": "common.json#/$defs/Numeric4" },
-        "remaining_qty_base": { "$ref": "common.json#/$defs/Numeric4", "description": "= ordered - accepted - cancelled." },
-        "unit_cost_entered": { "$ref": "common.json#/$defs/Numeric4" },
-        "unit_cost_base": { "$ref": "common.json#/$defs/Numeric4" },
+        "entered_ordered_qty": { "$ref": "common.json#/$defs/PositiveNumeric4" },
+        "conversion_snapshot": { "$ref": "common.json#/$defs/PositiveNumeric6" },
+        "ordered_qty_base": { "$ref": "common.json#/$defs/PositiveNumeric4" },
+        "received_qty_base": { "$ref": "common.json#/$defs/NonNegativeNumeric4", "description": "Cumulative ACCEPTED quantity only (rejected excluded)." },
+        "rejected_qty_base": { "$ref": "common.json#/$defs/NonNegativeNumeric4", "description": "Visible, replaceable; does not reduce the obligation." },
+        "cancelled_qty_base": { "$ref": "common.json#/$defs/NonNegativeNumeric4" },
+        "remaining_qty_base": { "$ref": "common.json#/$defs/NonNegativeNumeric4", "description": "= ordered - accepted - cancelled." },
+        "unit_cost_entered": { "$ref": "common.json#/$defs/NonNegativeNumeric4" },
+        "unit_cost_base": { "$ref": "common.json#/$defs/NonNegativeNumeric4" },
         "discount_amount": { "$ref": "common.json#/$defs/Money" },
         "tax_rate_snapshot": { "$ref": "common.json#/$defs/TaxRate", "description": "Snapshot of PRODUCT.tax_rate at PO creation." },
         "tax_amount": { "$ref": "common.json#/$defs/Money" },
@@ -117,8 +117,8 @@
       "properties": {
         "product_id": { "type": "string", "format": "uuid" },
         "product_uom_id": { "type": "string", "format": "uuid" },
-        "entered_ordered_qty": { "$ref": "common.json#/$defs/Numeric4", "description": ">0 in the entered UOM; server normalizes to base." },
-        "unit_cost_entered": { "$ref": "common.json#/$defs/Numeric4", "description": "Per entered UOM." },
+        "entered_ordered_qty": { "$ref": "common.json#/$defs/PositiveNumeric4", "description": ">0 in the entered UOM; server normalizes to base." },
+        "unit_cost_entered": { "$ref": "common.json#/$defs/NonNegativeNumeric4", "description": "Per entered UOM; never negative." },
         "discount_amount": { "$ref": "common.json#/$defs/Money", "default": "0.00" },
         "tax_rate_snapshot": { "$ref": "common.json#/$defs/TaxRate", "description": "OPTIONAL/informational; server snapshots PRODUCT.tax_rate." },
         "min_remaining_shelf_days": { "type": "integer", "minimum": 0, "default": 90 }
@@ -173,19 +173,38 @@
     },
     "ReceiveLineRequest": {
       "type": "object",
-      "required": ["po_line_id", "product_id", "product_uom_id", "received_qty_base", "accepted_qty_base", "batch_number"],
-      "description": "One receipt line per accepted/rejected lot. received_qty_base = accepted_qty_base + rejected_qty_base.",
+      "required": ["po_line_id", "product_id", "product_uom_id", "entered_qty", "batch_number"],
+      "description": "Quantities are entered in product_uom_id; the server normalizes them to base UOM. entered_accepted_qty defaults to entered_qty and entered_rejected_qty defaults to 0. If normalized *_qty_base fields are supplied, the server validates that they match the entered quantities and the equation received = accepted + rejected. Accepted quantity accumulates to PO received_qty_base; rejected quantity stays replaceable/cancellable; batch supplied per line.",
       "properties": {
         "po_line_id": { "type": "string", "format": "uuid" },
         "product_id": { "type": "string", "format": "uuid" },
-        "product_uom_id": { "type": "string", "format": "uuid" },
-        "accepted_qty_base": { "$ref": "common.json#/$defs/Numeric4", "description": ">=0; posts positive ledger lines; releases pro-rata allocation cost." },
-        "rejected_qty_base": { "$ref": "common.json#/$defs/Numeric4", "default": "0.0000", "description": "Does NOT enter sellable stock; stays replaceable." },
-        "received_qty_base": { "$ref": "common.json#/$defs/Numeric4" },
+        "product_uom_id": { "type": "string", "format": "uuid", "description": "Entered UOM for the entered_* quantity fields." },
+        "entered_qty": { "$ref": "common.json#/$defs/PositiveNumeric4" },
+        "entered_accepted_qty": { "$ref": "common.json#/$defs/NonNegativeNumeric4" },
+        "entered_rejected_qty": { "$ref": "common.json#/$defs/NonNegativeNumeric4" },
+        "received_qty_base": { "$ref": "common.json#/$defs/NonNegativeNumeric4", "description": "Optional client echo of normalized accepted + rejected; server-computed when omitted." },
+        "accepted_qty_base": { "$ref": "common.json#/$defs/NonNegativeNumeric4", "description": "Optional client echo of normalized accepted quantity; server-computed when omitted." },
+        "rejected_qty_base": { "$ref": "common.json#/$defs/NonNegativeNumeric4", "description": "Optional client echo of normalized rejected quantity; server-computed when omitted." },
         "batch_number": { "type": "string", "maxLength": 80, "description": "Exact, case-sensitive; batch row is created/reused deterministically (UUIDv5)." },
         "manufactured_on": { "type": ["string", "null"], "format": "date" },
         "expires_on": { "type": ["string", "null"], "format": "date", "description": "Required for lot-tracked products; must satisfy expires_on >= received_on + min_remaining_shelf_days." },
         "override_reason": { "type": ["string", "null"], "description": "Required for an authorized shelf-life exception (role-guarded); produces EXPIRY_POLICY_VIOLATION 422 if absent." }
+      }
+    },
+    "ReceiveLineDto": {
+      "type": "object",
+      "properties": {
+        "po_line_id": { "type": "string", "format": "uuid" },
+        "product_id": { "type": "string", "format": "uuid" },
+        "product_uom_id": { "type": "string", "format": "uuid" },
+        "entered_qty": { "$ref": "common.json#/$defs/PositiveNumeric4" },
+        "entered_accepted_qty": { "$ref": "common.json#/$defs/NonNegativeNumeric4" },
+        "entered_rejected_qty": { "$ref": "common.json#/$defs/NonNegativeNumeric4" },
+        "received_qty_base": { "$ref": "common.json#/$defs/NonNegativeNumeric4" },
+        "accepted_qty_base": { "$ref": "common.json#/$defs/NonNegativeNumeric4" },
+        "rejected_qty_base": { "$ref": "common.json#/$defs/NonNegativeNumeric4" },
+        "remaining_qty_base": { "$ref": "common.json#/$defs/NonNegativeNumeric4" },
+        "batch_id": { "type": "string", "format": "uuid" }
       }
     },
     "ReceivePurchaseOrderRequest": {
@@ -209,18 +228,7 @@
         "purchase_order_status": { "$ref": "#/$defs/PurchaseOrderStatus" },
         "lines": {
           "type": "array",
-          "items": {
-            "type": "object",
-            "required": ["po_line_id", "product_id", "accepted_qty_base", "rejected_qty_base", "remaining_qty_base", "batch_id"],
-            "properties": {
-              "po_line_id": { "type": "string", "format": "uuid" },
-              "product_id": { "type": "string", "format": "uuid" },
-              "accepted_qty_base": { "$ref": "common.json#/$defs/Numeric4" },
-              "rejected_qty_base": { "$ref": "common.json#/$defs/Numeric4" },
-              "remaining_qty_base": { "$ref": "common.json#/$defs/Numeric4" },
-              "batch_id": { "type": "string", "format": "uuid" }
-            }
-          }
+          "items": { "$ref": "#/$defs/ReceiveLineDto" }
         },
         "trace_id": { "type": "string" }
       }
@@ -232,7 +240,7 @@
       "properties": {
         "supplier_id": { "type": "string", "format": "uuid", "description": "Must match the PO supplier (DB composite FK enforced)." },
         "purchase_order_id": { "type": "string", "format": "uuid" },
-        "amount": { "$ref": "common.json#/$defs/Money", "description": ">0 and <= PO outstanding." },
+        "amount": { "$ref": "common.json#/$defs/PositiveMoney", "description": ">0 and <= PO outstanding." },
         "currency_code": { "type": "string", "description": "Must match the PO currency." },
         "method": { "type": "string", "const": "CASH" },
         "payment_reference": { "type": ["string", "null"], "maxLength": 100 },
@@ -261,13 +269,13 @@
     "VendorReturnStatus": { "type": "string", "enum": ["DRAFT", "POSTED", "CANCELLED"] },
     "VendorReturnLineRequest": {
       "type": "object",
-      "required": ["purchase_order_line_id", "batch_id", "location_id", "quantity_base"],
+      "required": ["purchase_order_line_id", "batch_id", "location_id", "quantity_base", "reason_code"],
       "properties": {
         "purchase_order_line_id": { "type": "string", "format": "uuid" },
         "batch_id": { "type": "string", "format": "uuid" },
         "location_id": { "type": "string", "format": "uuid" },
-        "quantity_base": { "$ref": "common.json#/$defs/Numeric4", "description": "Cannot exceed accepted received stock still available for that batch/line." },
-        "reason_code": { "type": ["string", "null"], "maxLength": 40 }
+        "quantity_base": { "$ref": "common.json#/$defs/PositiveNumeric4", "description": "Cannot exceed accepted received stock still available for that batch/line." },
+        "reason_code": { "type": "string", "maxLength": 40 }
       }
     },
     "CreateVendorReturnRequest": {
@@ -295,9 +303,9 @@
         "product_id": { "type": "string", "format": "uuid" },
         "batch_id": { "type": "string", "format": "uuid" },
         "location_id": { "type": "string", "format": "uuid" },
-        "quantity_base": { "$ref": "common.json#/$defs/Numeric4" },
-        "unit_cost_snapshot": { "$ref": "common.json#/$defs/Numeric4" },
-        "reason_code": { "type": ["string", "null"], "maxLength": 40 }
+        "quantity_base": { "$ref": "common.json#/$defs/PositiveNumeric4" },
+        "unit_cost_snapshot": { "$ref": "common.json#/$defs/NonNegativeNumeric4" },
+        "reason_code": { "type": "string", "maxLength": 40 }
       }
     },
     "VendorReturnDto": {

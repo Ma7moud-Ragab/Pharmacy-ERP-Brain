@@ -47,8 +47,8 @@
         "product_uom_id": { "type": "string", "format": "uuid" },
         "uom_code": { "type": "string", "maxLength": 20 },
         "display_name": { "type": "string", "maxLength": 50 },
-        "conversion_to_base": { "$ref": "common.json#/$defs/Numeric6", "description": ">0. Immutable once referenced by a posted document or stock." },
-        "sale_unit_price": { "$ref": "common.json#/$defs/Numeric4", "description": "REQUIRED (non-null, >=0) when is_sellable=true. This is the AUTHORITATIVE POS sale price." },
+        "conversion_to_base": { "$ref": "common.json#/$defs/PositiveNumeric6", "description": ">0. Immutable once referenced by a posted document or stock." },
+        "sale_unit_price": { "anyOf": [{ "$ref": "common.json#/$defs/NonNegativeNumeric4" }, { "type": "null" }], "description": "REQUIRED (non-null, >=0) when is_sellable=true. This is the AUTHORITATIVE POS sale price. Optional and null when is_sellable=false." },
         "is_base": { "type": "boolean" },
         "is_sellable": { "type": "boolean" },
         "is_purchasable": { "type": "boolean" },
@@ -61,8 +61,8 @@
       "properties": {
         "uom_code": { "type": "string", "maxLength": 20 },
         "display_name": { "type": "string", "maxLength": 50 },
-        "conversion_to_base": { "$ref": "common.json#/$defs/Numeric6", "description": ">0; must be 1.000000 for the base UOM." },
-        "sale_unit_price": { "$ref": "common.json#/$defs/Numeric4" },
+        "conversion_to_base": { "$ref": "common.json#/$defs/PositiveNumeric6", "description": ">0; must be 1.000000 for the base UOM." },
+        "sale_unit_price": { "anyOf": [{ "$ref": "common.json#/$defs/NonNegativeNumeric4" }, { "type": "null" }] },
         "is_base": { "type": "boolean", "default": false },
         "is_sellable": { "type": "boolean", "default": false },
         "is_purchasable": { "type": "boolean", "default": false }
@@ -73,7 +73,7 @@
       "description": "Permitted non-historical attributes only. conversion_to_base and is_base become immutable once referenced.",
       "properties": {
         "display_name": { "type": ["string", "null"], "maxLength": 50 },
-        "sale_unit_price": { "$ref": "common.json#/$defs/Numeric4" },
+        "sale_unit_price": { "anyOf": [{ "$ref": "common.json#/$defs/NonNegativeNumeric4" }, { "type": "null" }] },
         "is_sellable": { "type": ["boolean", "null"] },
         "is_purchasable": { "type": ["boolean", "null"] },
         "is_active": { "type": ["boolean", "null"], "description": "Deactivate with false; never deletes the row." }
@@ -147,21 +147,20 @@
         "reorder_rule_id": { "type": "string", "format": "uuid" },
         "product_id": { "type": "string", "format": "uuid" },
         "branch_id": { "type": "string", "format": "uuid" },
-        "reorder_point_base": { "$ref": "common.json#/$defs/Numeric4", "description": ">=0, in BASE units." },
-        "reorder_quantity_base": { "$ref": "common.json#/$defs/Numeric4", "description": ">=0, in BASE units." },
-        "max_quantity_base": { "$ref": "common.json#/$defs/Numeric4", "description": "NULL or >= reorder_point_base." },
+        "reorder_point_base": { "$ref": "common.json#/$defs/NonNegativeNumeric4", "description": ">=0, in BASE units." },
+        "reorder_quantity_base": { "$ref": "common.json#/$defs/PositiveNumeric4", "description": ">0, in BASE units." },
+        "max_quantity_base": { "anyOf": [{ "$ref": "common.json#/$defs/NonNegativeNumeric4" }, { "type": "null" }], "description": "NULL or >= reorder_point_base." },
         "is_active": { "type": "boolean" }
       }
     },
     "ReorderRuleRequest": {
       "type": "object",
-      "required": ["product_id", "branch_id", "reorder_point_base", "reorder_quantity_base"],
+      "description": "Product and branch are taken from the path; they are not accepted in the body, so the path is the single source of truth.",
+      "required": ["reorder_point_base", "reorder_quantity_base"],
       "properties": {
-        "product_id": { "type": "string", "format": "uuid" },
-        "branch_id": { "type": "string", "format": "uuid" },
-        "reorder_point_base": { "$ref": "common.json#/$defs/Numeric4" },
-        "reorder_quantity_base": { "$ref": "common.json#/$defs/Numeric4" },
-        "max_quantity_base": { "$ref": "common.json#/$defs/Numeric4" },
+        "reorder_point_base": { "$ref": "common.json#/$defs/NonNegativeNumeric4" },
+        "reorder_quantity_base": { "$ref": "common.json#/$defs/PositiveNumeric4" },
+        "max_quantity_base": { "anyOf": [{ "$ref": "common.json#/$defs/NonNegativeNumeric4" }, { "type": "null" }] },
         "is_active": { "type": "boolean", "default": true }
       }
     }

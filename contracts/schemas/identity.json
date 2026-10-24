@@ -30,7 +30,7 @@
         "address": { "$ref": "common.json#/$defs/AddressDto" },
         "branch": {
           "type": "object",
-          "required": ["code", "name"],
+          "required": ["code", "name", "address"],
           "properties": {
             "code": { "type": "string", "maxLength": 30 },
             "name": { "type": "string", "maxLength": 150 },
@@ -107,7 +107,7 @@
     },
     "BranchEnrollmentResultDto": {
       "type": "object",
-      "description": "Branch runtime redeems the token; runs on BranchLocal runtime only.",
+      "description": "Cloud endpoint (token hash is cloud-owned); the branch runtime calls it during enrollment. 410 when the token is expired or consumed.",
       "properties": {
         "organization_id": { "type": "string", "format": "uuid" },
         "branch_id": { "type": "string", "format": "uuid" },
@@ -118,7 +118,7 @@
     },
     "EmployeeDto": {
       "type": "object",
-      "required": ["employee_id", "organization_id", "branch_id", "employee_no", "full_name", "is_active"],
+      "required": ["employee_id", "organization_id", "branch_id", "employee_no", "full_name", "address", "hired_on", "is_active"],
       "properties": {
         "employee_id": { "type": "string", "format": "uuid" },
         "organization_id": { "type": "string", "format": "uuid" },
@@ -128,7 +128,8 @@
         "email": { "type": ["string", "null"], "maxLength": 254 },
         "phone": { "type": ["string", "null"], "maxLength": 30 },
         "job_title": { "type": ["string", "null"], "maxLength": 80 },
-        "hired_on": { "type": ["string", "null"], "format": "date" },
+        "address": { "$ref": "common.json#/$defs/AddressDto" },
+        "hired_on": { "type": "string", "format": "date" },
         "is_active": { "type": "boolean" },
         "created_at": { "$ref": "common.json#/$defs/Timestamp" },
         "updated_at": { "$ref": "common.json#/$defs/Timestamp" }
@@ -136,14 +137,17 @@
     },
     "EmployeeRequest": {
       "type": "object",
-      "required": ["branch_id", "employee_no", "full_name"],
+      "required": ["branch_id", "employee_no", "full_name", "address", "hired_on", "is_active"],
       "properties": {
         "branch_id": { "type": "string", "format": "uuid" },
         "employee_no": { "type": "string", "maxLength": 30 },
         "full_name": { "type": "string", "maxLength": 150 },
         "email": { "type": ["string", "null"], "maxLength": 254 },
         "phone": { "type": ["string", "null"], "maxLength": 30 },
-        "job_title": { "type": ["string", "null"], "maxLength": 80 }
+        "job_title": { "type": ["string", "null"], "maxLength": 80 },
+        "address": { "$ref": "common.json#/$defs/AddressDto" },
+        "hired_on": { "type": "string", "format": "date" },
+        "is_active": { "type": "boolean" }
       }
     },
     "EmployeePatchRequest": {
@@ -155,6 +159,7 @@
         "email": { "type": ["string", "null"], "maxLength": 254 },
         "phone": { "type": ["string", "null"], "maxLength": 30 },
         "job_title": { "type": ["string", "null"], "maxLength": 80 },
+        "address": { "$ref": "common.json#/$defs/AddressDto" },
         "hired_on": { "type": ["string", "null"], "format": "date" },
         "is_active": { "type": ["boolean", "null"] }
       }
@@ -164,7 +169,7 @@
       "required": ["user_id", "employee_id", "username", "role", "branch_scope", "is_active"],
       "properties": {
         "user_id": { "type": "string", "format": "uuid" },
-        "employee_id": { "type": ["string", "null"], "format": "uuid" },
+        "employee_id": { "type": "string", "format": "uuid" },
         "username": { "type": "string", "maxLength": 80, "description": "Unique per organization (NOT globally)." },
         "role": { "$ref": "common.json#/$defs/Role" },
         "branch_scope": { "$ref": "common.json#/$defs/BranchScope" },

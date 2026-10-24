@@ -1,0 +1,119 @@
+erDiagram
+    sync_checkpoint {
+        uuid tenant_id PK
+        text resource PK
+        timestamptz high_watermark
+        text cursor
+        text last_status
+        timestamptz last_started_at
+        timestamptz last_finished_at
+        text last_error_code
+        int consecutive_failures
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    ingest_failure {
+        uuid id PK
+        uuid tenant_id
+        text failure_kind
+        text resource
+        text error_code
+        text error_message
+        jsonb payload_excerpt
+        int attempts
+        text status
+        timestamptz first_failed_at
+        timestamptz last_failed_at
+        timestamptz resolved_at
+        text resolved_by
+        text resolution
+        char trace_id
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    canonical_cache {
+        uuid id PK
+        uuid tenant_id
+        text entity_type
+        text entity_id
+        text schema_name
+        text schema_version
+        jsonb payload
+        char payload_sha256
+        timestamptz source_updated_at
+        timestamptz synced_at
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    sales_fact {
+        uuid id PK
+        uuid tenant_id
+        uuid product_id
+        date sales_date
+        numeric units_sold
+        numeric units_returned
+        numeric net_units
+        text day_status
+        bool is_complete
+        timestamptz source_updated_at
+        text source_mode
+        timestamptz polled_at
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    sales_day_coverage {
+        uuid tenant_id PK
+        date business_date PK
+        text status
+        text verified_via
+        timestamptz verified_at
+        text gap_reason
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    calendar_day {
+        uuid tenant_id PK
+        date calendar_date PK
+        bool is_holiday
+        text holiday_name
+        bool is_ramadan
+        bool is_flu_season
+        text source
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    feature_daily {
+        uuid tenant_id PK
+        uuid product_id PK
+        date feature_date PK
+        smallint feature_set_version
+        numeric y_units
+        text y_status
+        bool is_outlier
+        int history_days
+        smallint n_obs_7
+        smallint n_obs_28
+        numeric lag_1
+        numeric lag_7
+        numeric lag_14
+        numeric lag_28
+        numeric roll_mean_7
+        numeric roll_mean_14
+        numeric roll_mean_28
+        numeric roll_std_7
+        numeric roll_std_28
+        smallint dow
+        smallint month
+        smallint day_of_month
+        smallint week_of_year
+        bool is_holiday
+        bool is_ramadan
+        bool is_flu_season
+        bool is_promotion
+        timestamptz computed_at
+        text compute_mode
+        timestamptz inputs_max_updated_at
+    }
+    sales_fact ||..o{ feature_daily : "logical product+date"
+    calendar_day ||..o{ feature_daily : "logical date"
+    sales_day_coverage ||..o{ feature_daily : "logical zero vs missing"

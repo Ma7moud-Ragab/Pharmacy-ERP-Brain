@@ -195,7 +195,9 @@ export interface paths {
      * Branch runtime redeems enrollment token
      * @description Redeems a single-use token; returns organization_id, branch_id,
      *     runtime credential, initial sync cursor, and credential expiry.
-     *     Runs on the branch-local API (x-runtime BranchLocal).
+     *     Served by Cloud because enrollment tokens are stored hashed in the
+     *     cloud identity store; the branch runtime calls this cloud endpoint
+     *     over the authenticated bootstrap channel.
      */
     post: operations['redeemBranchEnrollment'];
     delete?: never;
@@ -572,10 +574,12 @@ export interface paths {
     get?: never;
     put?: never;
     /**
-     * Posting-only command: OPENING_BALANCE or authorized stock correction
-     *     (ADJUSTMENT_IN / ADJUSTMENT_OUT). Branch-local; requires counted
-     *     quantity, batch (or NON-LOT), location, and authorized unit-cost.
-     *     DRAFT editing allowed; POSTED rows immutable; corrections use REVERSAL.
+     * Posting-only command: OPENING_BALANCE, authorized stock correction
+     *     (ADJUSTMENT_IN / ADJUSTMENT_OUT), or REVERSAL of a POSTED transaction.
+     *     Branch-local; requires counted quantity, batch (or NON-LOT), location,
+     *     and authorized unit-cost (as applicable). DRAFT editing is allowed via
+     *     PATCH; POSTED rows are immutable, so corrections/reversals are new
+     *     transactions posted through this same endpoint.
      */
     post: operations['postInventoryAdjustment'];
     delete?: never;
@@ -595,8 +599,14 @@ export interface paths {
     };
     get?: never;
     put?: never;
-    /** Post a DRAFT adjustment (X-ERP-Action=POST) or post a REVERSAL of this transaction (X-ERP-Action=REVERSE) */
-    post: operations['postOrReverseInventoryAdjustment'];
+    /**
+     * Post a DRAFT adjustment; use POST /inventory/adjustments for reversals
+     * @description Commits this DRAFT adjustment. Posted transactions and lines are
+     *     immutable; corrections and reversals are new transactions created via
+     *     POST /inventory/adjustments with transaction_type=REVERSAL and
+     *     reverses_inventory_txn_id.
+     */
+    post: operations['postInventoryAdjustmentById'];
     delete?: never;
     options?: never;
     head?: never;
@@ -875,6 +885,25 @@ export interface paths {
     /** Get purchase order detail */
     get: operations['getPurchaseOrder'];
     put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** DRAFT-only edit (409 after approval/order) */
+    patch: operations['patchPurchaseOrder'];
+    trace?: never;
+  };
+  '/purchase-orders/{purchaseOrderId}/cancel': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        purchaseOrderId: components['parameters']['purchaseOrderId'];
+      };
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
     /**
      * DRAFT/APPROVED pre-order cancel with reason, only when paid_amount=0.
      *     After ORDERED, remaining-quantity cancellation must use /cancel-remaining.
@@ -883,8 +912,7 @@ export interface paths {
     delete?: never;
     options?: never;
     head?: never;
-    /** DRAFT-only edit (409 after approval/order) */
-    patch: operations['patchPurchaseOrder'];
+    patch?: never;
     trace?: never;
   };
   '/purchase-orders/{purchaseOrderId}/approve': {
@@ -1089,16 +1117,25 @@ export type webhooks = Record<string, never>;
 export interface components {
   schemas: {
     /**
-     * @description Serialized as plain decimal string to preserve numeric(18,2) precision
-     *     exactly. Never use IEEE-754 floats for money on FE if you want to avoid
-     *     drift; treat this as a fixed-2-decimal string.
+     * @description Non-negative monetary amount serialized as a plain decimal string to
+     *     preserve numeric(18,2) precision exactly. Never use IEEE-754 floats for
+     *     money on FE; treat this as a fixed-2-decimal string. Amounts that must
+     *     be strictly positive add a >0 rule at the owning field.
      * @example 1250.00
      */
     Money: string;
-    /** @description numeric(18,4) serialized as fixed-4 decimal string (qty / unit cost). */
+    /** @description Signed numeric(18,4) serialized as fixed-4 decimal string; use only for signed ledger deltas. */
     Numeric4: string;
-    /** @description numeric(18,6) serialized as fixed-6 decimal string (conversion factor). */
+    /** @description Non-negative numeric(18,4) quantity or unit cost. */
+    NonNegativeNumeric4: string;
+    /** @description Strictly positive numeric(18,4) quantity. */
+    PositiveNumeric4: string;
+    /** @description Signed numeric(18,6) serialized as fixed-6 decimal string. */
     Numeric6: string;
+    /** @description Strictly positive numeric(18,6) conversion factor; conversion must be >0. */
+    PositiveNumeric6: string;
+    /** @description Strictly positive monetary amount (numeric(18,2)) for amounts that cannot be zero. */
+    PositiveMoney: string;
     /** @description Fractional tax rate numeric(9,4); 0.1400 = 14%. */
     TaxRate: string;
     /**
@@ -1150,6 +1187,7 @@ export interface components {
          *     NOT_FOUND(404), CONFLICT(409),
          *     INVALID_STATE_TRANSITION(409),
          *     OUT_OF_STOCK(409), IDEMPOTENCY_MISMATCH(409),
+         *     GONE(410),
          *     VALIDATION_ERROR(422), EXPIRY_POLICY_VIOLATION(422),
          *     INTERNAL_ERROR(500).
          * @enum {string}
@@ -1164,6 +1202,7 @@ export interface components {
           | 'INVALID_STATE_TRANSITION'
           | 'OUT_OF_STOCK'
           | 'IDEMPOTENCY_MISMATCH'
+          | 'GONE'
           | 'VALIDATION_ERROR'
           | 'EXPIRY_POLICY_VIOLATION'
           | 'INTERNAL_ERROR';
@@ -1173,7 +1212,7 @@ export interface components {
         details?: {
           /** @description JSON path e.g. "lines[0].quantity" */
           field?: string;
-          issue?: string;
+          issue: string;
         }[];
         /** @description Matches the W3C traceparent propagated in the call. */
         trace_id?: string;
@@ -1239,36 +1278,32 @@ export interface components {
     CurrentUserContextDto: {
       user: components['schemas']['UserDto'];
       organization_id: components['schemas']['Uuid'];
-      organization_code?: string;
+      organization_code: string;
       branch_scope: components['schemas']['BranchScope'];
       branch_ids: components['schemas']['Uuid'][];
       roles: components['schemas']['Role'][];
       scopes: components['schemas']['PermissionScope'][];
-      runtime?: components['schemas']['RuntimeMode'];
-      /** @description Extra context headers/metadata supplied by the FE. */
-      issuance_context?: {
-        [key: string]: unknown;
-      };
+      runtime: components['schemas']['RuntimeMode'];
     };
     /** @description Flattened owned value object (EF address_ prefixed columns) */
     AddressDto: {
-      line1?: string;
+      line1: string;
       line2?: string | null;
-      city?: string;
+      city: string;
       region?: string | null;
       postal_code?: string | null;
-      country_code?: string;
+      country_code: string;
     };
     OrganizationDto: {
-      organization_id?: components['schemas']['Uuid'];
-      organization_code?: string;
-      name?: string;
+      organization_id: components['schemas']['Uuid'];
+      organization_code: string;
+      name: string;
       /** @default EGP */
       base_currency: string;
       /** @description IANA TZ identifier e.g. "Africa/Cairo". */
-      time_zone_id?: string;
+      time_zone_id: string;
       address?: components['schemas']['AddressDto'];
-      is_active?: boolean;
+      is_active: boolean;
     };
     CreateOrganizationRequest: {
       organization_code: string;
@@ -1281,7 +1316,7 @@ export interface components {
       branch: {
         code: string;
         name: string;
-        address?: components['schemas']['AddressDto'];
+        address: components['schemas']['AddressDto'];
       };
       admin: {
         employee_no: string;
@@ -1292,21 +1327,21 @@ export interface components {
       };
     };
     OrganizationSetupResultDto: {
-      organization?: components['schemas']['OrganizationDto'];
-      branch?: components['schemas']['BranchDto'];
-      employee?: components['schemas']['EmployeeDto'];
-      user?: components['schemas']['UserDto'];
+      organization: components['schemas']['OrganizationDto'];
+      branch: components['schemas']['BranchDto'];
+      employee: components['schemas']['EmployeeDto'];
+      user: components['schemas']['UserDto'];
       /** @enum {string} */
-      enrollment_setup_state?: 'PENDING' | 'ENROLLED' | 'FAILED';
+      enrollment_setup_state: 'PENDING' | 'ENROLLED' | 'FAILED';
     };
     BranchDto: {
-      branch_id?: components['schemas']['Uuid'];
-      organization_id?: components['schemas']['Uuid'];
+      branch_id: components['schemas']['Uuid'];
+      organization_id: components['schemas']['Uuid'];
       /** @description branch_code */
-      code?: string;
-      name?: string;
+      code: string;
+      name: string;
       address?: components['schemas']['AddressDto'];
-      is_active?: boolean;
+      is_active: boolean;
       created_at?: components['schemas']['Timestamp'];
       updated_at?: components['schemas']['Timestamp'];
     };
@@ -1324,36 +1359,37 @@ export interface components {
       is_active?: boolean;
     };
     EnrollmentTokenDto: {
-      enrollment_id?: components['schemas']['Uuid'];
+      enrollment_id: components['schemas']['Uuid'];
       /** @description Single-use opaque token; only this plain value leaves now (we store hash). */
-      token?: string;
-      expires_at?: components['schemas']['Timestamp'];
+      token: string;
+      expires_at: components['schemas']['Timestamp'];
     };
     BranchEnrollmentRequest: {
       token: string;
     };
     BranchEnrollmentResultDto: {
-      organization_id?: components['schemas']['Uuid'];
-      branch_id?: components['schemas']['Uuid'];
+      organization_id: components['schemas']['Uuid'];
+      branch_id: components['schemas']['Uuid'];
       /** Format: password */
-      runtime_credential?: string;
+      runtime_credential: string;
       /** @description Opaque bootstrap cursor to store in branch-local DB. */
-      initial_cursor?: string;
-      credential_expires_at?: components['schemas']['Timestamp'];
+      initial_cursor: string;
+      credential_expires_at: components['schemas']['Timestamp'];
     };
     EmployeeDto: {
-      employee_id?: components['schemas']['Uuid'];
-      organization_id?: components['schemas']['Uuid'];
-      branch_id?: components['schemas']['Uuid'];
-      employee_no?: string;
-      full_name?: string;
+      employee_id: components['schemas']['Uuid'];
+      organization_id: components['schemas']['Uuid'];
+      branch_id: components['schemas']['Uuid'];
+      employee_no: string;
+      full_name: string;
       /** Format: email */
       email?: string | null;
       phone?: string | null;
       job_title?: string | null;
+      address: components['schemas']['AddressDto'];
       /** Format: date */
-      hired_on?: string | null;
-      is_active?: boolean;
+      hired_on: string;
+      is_active: boolean;
       created_at?: components['schemas']['Timestamp'];
       updated_at?: components['schemas']['Timestamp'];
     };
@@ -1365,6 +1401,10 @@ export interface components {
       email?: string | null;
       phone?: string | null;
       job_title?: string | null;
+      address: components['schemas']['AddressDto'];
+      /** Format: date */
+      hired_on: string;
+      is_active: boolean;
     };
     EmployeePatchRequest: {
       branch_id?: components['schemas']['Uuid'];
@@ -1374,6 +1414,7 @@ export interface components {
       email?: string | null;
       phone?: string | null;
       job_title?: string | null;
+      address?: components['schemas']['AddressDto'];
       /** Format: date */
       hired_on?: string | null;
       is_active?: boolean;
@@ -1386,11 +1427,11 @@ export interface components {
       branch_scope: components['schemas']['BranchScope'];
       is_active: boolean;
       readonly access_failed_count?: number;
-      readonly lockout_end?: components['schemas']['Timestamp'];
-      readonly last_login_at?: components['schemas']['Timestamp'];
+      readonly lockout_end?: components['schemas']['Timestamp'] | null;
+      readonly last_login_at?: components['schemas']['Timestamp'] | null;
     };
     BranchAccessGrantDto: {
-      branch_id?: components['schemas']['Uuid'];
+      branch_id: components['schemas']['Uuid'];
       readonly branch_code?: string;
     };
     CreateUserRequest: {
@@ -1415,17 +1456,17 @@ export interface components {
       new_password: string;
     };
     ProductCategoryDto: {
-      category_id?: components['schemas']['Uuid'];
-      parent_category_id?: components['schemas']['Uuid'];
-      code?: string;
-      name?: string;
+      category_id: components['schemas']['Uuid'];
+      parent_category_id?: components['schemas']['Uuid'] | null;
+      code: string;
+      name: string;
       description?: string | null;
-      is_active?: boolean;
+      is_active: boolean;
       created_at?: components['schemas']['Timestamp'];
       updated_at?: components['schemas']['Timestamp'];
     };
     ProductCategoryRequest: {
-      parent_category_id?: components['schemas']['Uuid'];
+      parent_category_id?: components['schemas']['Uuid'] | null;
       code: string;
       name: string;
       description?: string | null;
@@ -1433,29 +1474,29 @@ export interface components {
       is_active: boolean;
     };
     ProductCategoryPatchRequest: {
-      parent_category_id?: components['schemas']['Uuid'];
+      parent_category_id?: components['schemas']['Uuid'] | null;
       code?: string;
       name?: string;
       description?: string | null;
       is_active?: boolean;
     };
     ProductUomDto: {
-      product_uom_id?: components['schemas']['Uuid'];
-      uom_code?: string;
-      display_name?: string;
-      conversion_to_base?: components['schemas']['Numeric6'];
-      /** @description Required (non-null, >= 0) when is_sellable=true; the authoritative POS sale price. */
-      sale_unit_price?: components['schemas']['Numeric4'];
-      is_base?: boolean;
-      is_sellable?: boolean;
-      is_purchasable?: boolean;
-      is_active?: boolean;
+      product_uom_id: components['schemas']['Uuid'];
+      uom_code: string;
+      display_name: string;
+      conversion_to_base: components['schemas']['PositiveNumeric6'];
+      /** @description Required (non-null, >= 0) when is_sellable=true; the authoritative POS sale price. Optional and null when is_sellable=false. */
+      sale_unit_price?: components['schemas']['NonNegativeNumeric4'] | null;
+      is_base: boolean;
+      is_sellable: boolean;
+      is_purchasable: boolean;
+      is_active: boolean;
     };
     ProductUomRequest: {
       uom_code: string;
       display_name: string;
-      conversion_to_base: components['schemas']['Numeric6'];
-      sale_unit_price?: components['schemas']['Numeric4'];
+      conversion_to_base: components['schemas']['PositiveNumeric6'];
+      sale_unit_price?: components['schemas']['NonNegativeNumeric4'] | null;
       /** @default false */
       is_base: boolean;
       /** @default false */
@@ -1470,27 +1511,27 @@ export interface components {
      */
     ProductUomPatchRequest: {
       display_name?: string;
-      sale_unit_price?: components['schemas']['Numeric4'];
+      sale_unit_price?: components['schemas']['NonNegativeNumeric4'] | null;
       is_sellable?: boolean;
       is_purchasable?: boolean;
       is_active?: boolean;
     };
     ProductDto: {
-      product_id?: components['schemas']['Uuid'];
-      category_id?: components['schemas']['Uuid'];
-      sku?: string;
+      product_id: components['schemas']['Uuid'];
+      category_id: components['schemas']['Uuid'];
+      sku: string;
       barcode?: string | null;
-      name?: string;
+      name: string;
       generic_name?: string | null;
       brand_name?: string | null;
-      base_uom_code?: string;
+      base_uom_code: string;
       /** @description Fractional 0..1 */
-      tax_rate?: components['schemas']['TaxRate'];
+      tax_rate: components['schemas']['TaxRate'];
       image_url?: string | null;
-      lot_tracking_required?: boolean;
-      expiry_alert_days?: number;
-      is_active?: boolean;
-      uoms?: components['schemas']['ProductUomDto'][];
+      lot_tracking_required: boolean;
+      expiry_alert_days: number;
+      is_active: boolean;
+      uoms: components['schemas']['ProductUomDto'][];
       created_at?: components['schemas']['Timestamp'];
       updated_at?: components['schemas']['Timestamp'];
     };
@@ -1526,41 +1567,43 @@ export interface components {
       is_active?: boolean;
     };
     ReorderRuleDto: {
-      reorder_rule_id?: components['schemas']['Uuid'];
-      product_id?: components['schemas']['Uuid'];
-      branch_id?: components['schemas']['Uuid'];
-      reorder_point_base?: components['schemas']['Numeric4'];
-      reorder_quantity_base?: components['schemas']['Numeric4'];
-      max_quantity_base?: components['schemas']['Numeric4'];
-      is_active?: boolean;
-    };
-    ReorderRuleRequest: {
+      reorder_rule_id: components['schemas']['Uuid'];
       product_id: components['schemas']['Uuid'];
       branch_id: components['schemas']['Uuid'];
-      reorder_point_base: components['schemas']['Numeric4'];
-      reorder_quantity_base: components['schemas']['Numeric4'];
-      max_quantity_base?: components['schemas']['Numeric4'];
+      reorder_point_base: components['schemas']['NonNegativeNumeric4'];
+      reorder_quantity_base: components['schemas']['PositiveNumeric4'];
+      max_quantity_base?: components['schemas']['NonNegativeNumeric4'] | null;
+      is_active: boolean;
+    };
+    /**
+     * @description Product and branch are taken from the path; they are not accepted in
+     *     the body, so the path is the single source of truth.
+     */
+    ReorderRuleRequest: {
+      reorder_point_base: components['schemas']['NonNegativeNumeric4'];
+      reorder_quantity_base: components['schemas']['PositiveNumeric4'];
+      max_quantity_base?: components['schemas']['NonNegativeNumeric4'] | null;
       /** @default true */
       is_active: boolean;
     };
     /**
-     * @description Only SELLABLE location_type may have is_sellable=true. DAMAGED / QUARANTINE / SCRAP are always is_sellable=false.
+     * @description Only SELLABLE location_type may have is_sellable=true. QUARANTINE and SCRAP are always is_sellable=false.
      * @enum {string}
      */
-    LocationType: 'SELLABLE' | 'QUARANTINE' | 'DAMAGED' | 'SCRAP';
+    LocationType: 'SELLABLE' | 'QUARANTINE' | 'SCRAP';
     /**
      * @description Availability for sale further requires non-expired-by-date and an eligible SELLABLE location; the current date-eligibility check is independently evaluated even if stored quality value hasn't refreshed.
      * @enum {string}
      */
     BatchQualityStatus: 'AVAILABLE' | 'QUARANTINED' | 'EXPIRED' | 'RECALLED';
     InventoryLocationDto: {
-      location_id?: components['schemas']['Uuid'];
-      branch_id?: components['schemas']['Uuid'];
-      location_code?: string;
-      name?: string;
-      location_type?: components['schemas']['LocationType'];
-      is_sellable?: boolean;
-      is_active?: boolean;
+      location_id: components['schemas']['Uuid'];
+      branch_id: components['schemas']['Uuid'];
+      location_code: string;
+      name: string;
+      location_type: components['schemas']['LocationType'];
+      is_sellable: boolean;
+      is_active: boolean;
     };
     InventoryLocationRequest: {
       branch_id: components['schemas']['Uuid'];
@@ -1577,28 +1620,34 @@ export interface components {
     };
     InventoryBatchDto: {
       /** @description Deterministic UUIDv5; identical across branches */
-      batch_id?: components['schemas']['Uuid'];
-      product_id?: components['schemas']['Uuid'];
+      batch_id: components['schemas']['Uuid'];
+      product_id: components['schemas']['Uuid'];
       /** @description Exact, case-sensitive */
-      batch_number?: string;
+      batch_number: string;
       /** Format: date */
       manufactured_on?: string | null;
       /** Format: date */
       expires_on?: string | null;
-      quality_status?: components['schemas']['BatchQualityStatus'];
+      quality_status: components['schemas']['BatchQualityStatus'];
       /** @description True for reserved batch_number=NON-LOT with NULL dates. */
       readonly is_non_lot?: boolean;
     };
     InventoryBalanceDto: {
-      product_id?: components['schemas']['Uuid'];
-      branch_id?: components['schemas']['Uuid'];
-      location_id?: components['schemas']['Uuid'];
-      batch_id?: components['schemas']['Uuid'];
+      product_id: components['schemas']['Uuid'];
+      branch_id: components['schemas']['Uuid'];
+      location_id: components['schemas']['Uuid'];
+      batch_id: components['schemas']['Uuid'];
       /** @description Always >= 0 */
-      on_hand_qty_base?: components['schemas']['Numeric4'];
-      average_unit_cost?: components['schemas']['Numeric4'];
-      /** @description Server-derived eligible (sellable location + acceptable quality/expiry); equals on_hand in MVP (no reservations). */
-      available_qty_base?: components['schemas']['Numeric4'];
+      on_hand_qty_base: components['schemas']['NonNegativeNumeric4'];
+      average_unit_cost: components['schemas']['NonNegativeNumeric4'];
+      /**
+       * @description Server-derived eligible quantity: sum of on_hand from sellable
+       *     locations for batches that are AVAILABLE, not expired by business
+       *     date, and not recalled. With no reservations in MVP this normally
+       *     equals eligible on_hand, not raw on_hand across all locations.
+       *     Never negative.
+       */
+      available_qty_base: components['schemas']['NonNegativeNumeric4'];
       /** Format: int64 */
       readonly row_version?: number;
       updated_at?: components['schemas']['Timestamp'];
@@ -1623,48 +1672,65 @@ export interface components {
      */
     InventoryTxnStatus: 'DRAFT' | 'POSTED' | 'CANCELLED';
     InventoryTxnLineDto: {
-      inventory_txn_line_id?: components['schemas']['Uuid'];
-      product_id?: components['schemas']['Uuid'];
-      location_id?: components['schemas']['Uuid'];
-      batch_id?: components['schemas']['Uuid'];
+      inventory_txn_line_id: components['schemas']['Uuid'];
+      product_id: components['schemas']['Uuid'];
+      location_id: components['schemas']['Uuid'];
+      batch_id: components['schemas']['Uuid'];
       /** @description Product's base UOM for ledger lines. */
-      product_uom_id?: components['schemas']['Uuid'];
-      entered_qty?: components['schemas']['Numeric4'];
-      conversion_snapshot?: components['schemas']['Numeric6'];
-      /** @description Signed; never 0. */
-      quantity_delta_base?: components['schemas']['Numeric4'];
-      unit_cost_base?: components['schemas']['Numeric4'];
-      sales_order_line_id?: components['schemas']['Uuid'];
-      sales_return_line_id?: components['schemas']['Uuid'];
-      purchase_order_line_id?: components['schemas']['Uuid'];
-      vendor_return_line_id?: components['schemas']['Uuid'];
+      product_uom_id: components['schemas']['Uuid'];
+      entered_qty: components['schemas']['PositiveNumeric4'];
+      conversion_snapshot: components['schemas']['PositiveNumeric6'];
+      /** @description Signed non-zero base-quantity delta; never 0. */
+      quantity_delta_base: components['schemas']['Numeric4'];
+      unit_cost_base?: components['schemas']['NonNegativeNumeric4'] | null;
+      sales_order_line_id?: components['schemas']['Uuid'] | null;
+      sales_return_line_id?: components['schemas']['Uuid'] | null;
+      purchase_order_line_id?: components['schemas']['Uuid'] | null;
+      vendor_return_line_id?: components['schemas']['Uuid'] | null;
     };
     InventoryTxnDto: {
-      inventory_txn_id?: components['schemas']['Uuid'];
-      branch_id?: components['schemas']['Uuid'];
-      transaction_no?: string;
-      transaction_type?: components['schemas']['InventoryTxnType'];
-      status?: components['schemas']['InventoryTxnStatus'];
+      inventory_txn_id: components['schemas']['Uuid'];
+      branch_id: components['schemas']['Uuid'];
+      transaction_no: string;
+      transaction_type: components['schemas']['InventoryTxnType'];
+      status: components['schemas']['InventoryTxnStatus'];
       reason_code?: string | null;
       note?: string | null;
-      posted_at?: components['schemas']['Timestamp'];
+      posted_at?: components['schemas']['Timestamp'] | null;
       created_by_employee_id?: components['schemas']['Uuid'];
-      reverses_inventory_txn_id?: components['schemas']['Uuid'];
-      sales_order_id?: components['schemas']['Uuid'];
-      sales_return_id?: components['schemas']['Uuid'];
-      purchase_order_id?: components['schemas']['Uuid'];
-      vendor_return_id?: components['schemas']['Uuid'];
-      lines?: components['schemas']['InventoryTxnLineDto'][];
+      reverses_inventory_txn_id?: components['schemas']['Uuid'] | null;
+      sales_order_id?: components['schemas']['Uuid'] | null;
+      sales_return_id?: components['schemas']['Uuid'] | null;
+      purchase_order_id?: components['schemas']['Uuid'] | null;
+      vendor_return_id?: components['schemas']['Uuid'] | null;
+      lines: components['schemas']['InventoryTxnLineDto'][];
     };
     InventoryTxnRequest: {
-      /** @description For /inventory/adjustments this is OPENING_BALANCE, ADJUSTMENT_IN, ADJUSTMENT_OUT, or REVERSAL. */
-      transaction_type: components['schemas']['InventoryTxnType'];
+      /**
+       * @description Adjustment endpoint only. Ledger-generated types (SALE_ISSUE,
+       *     SALES_RETURN_IN, PURCHASE_RECEIPT, VENDOR_RETURN_OUT, SCRAP_OUT)
+       *     are server-created by their owning workflows and cannot be posted
+       *     here.
+       * @enum {string}
+       */
+      transaction_type:
+        'OPENING_BALANCE' | 'ADJUSTMENT_IN' | 'ADJUSTMENT_OUT' | 'REVERSAL';
       branch_id: components['schemas']['Uuid'];
-      reason_code?: string | null;
+      reason_code: string;
       note?: string | null;
-      /** @description Required when transaction_type=REVERSAL. */
-      reverses_inventory_txn_id?: components['schemas']['Uuid'];
+      /** @description Required when transaction_type=REVERSAL; must reference a POSTED transaction in the same branch. */
+      reverses_inventory_txn_id?: components['schemas']['Uuid'] | null;
       lines: components['schemas']['InventoryTxnLineRequest'][];
+    };
+    /**
+     * @description Partial edit for a DRAFT adjustment only. transaction_type, branch_id,
+     *     and reverses_inventory_txn_id are immutable after creation. Posted
+     *     transactions are immutable and must be corrected by a new REVERSAL.
+     */
+    InventoryTxnPatchRequest: {
+      reason_code?: string;
+      note?: string | null;
+      lines?: components['schemas']['InventoryTxnLineRequest'][];
     };
     InventoryTxnLineRequest: {
       product_id: components['schemas']['Uuid'];
@@ -1673,42 +1739,42 @@ export interface components {
       batch_id: components['schemas']['Uuid'];
       /** @description Typically the product's base UOM; conversion must be >0. */
       product_uom_id: components['schemas']['Uuid'];
-      entered_qty: components['schemas']['Numeric4'];
-      /** @description Required for ADJUSTMENT_IN / OPENING_BALANCE; server uses current balance cost for ADJUSTMENT_OUT and reversals. */
-      unit_cost_base?: components['schemas']['Numeric4'];
+      entered_qty: components['schemas']['PositiveNumeric4'];
+      /** @description Required for ADJUSTMENT_IN / OPENING_BALANCE; server uses current balance cost for ADJUSTMENT_OUT and reversals; never negative. */
+      unit_cost_base?: components['schemas']['NonNegativeNumeric4'] | null;
     };
     /** @enum {string} */
     SalesOrderStatus: 'DRAFT' | 'COMPLETED' | 'CANCELLED';
     SalesOrderLineDto: {
-      order_line_id?: components['schemas']['Uuid'];
-      product_id?: components['schemas']['Uuid'];
-      product_uom_id?: components['schemas']['Uuid'];
-      entered_qty?: components['schemas']['Numeric4'];
-      conversion_snapshot?: components['schemas']['Numeric6'];
-      quantity_base?: components['schemas']['Numeric4'];
-      unit_price_snapshot?: components['schemas']['Numeric4'];
+      order_line_id: components['schemas']['Uuid'];
+      product_id: components['schemas']['Uuid'];
+      product_uom_id: components['schemas']['Uuid'];
+      entered_qty: components['schemas']['PositiveNumeric4'];
+      conversion_snapshot: components['schemas']['PositiveNumeric6'];
+      quantity_base: components['schemas']['PositiveNumeric4'];
+      unit_price_snapshot: components['schemas']['NonNegativeNumeric4'];
       /** @description Always 0 for MVP */
-      discount_amount?: components['schemas']['Money'];
-      tax_rate_snapshot?: components['schemas']['TaxRate'];
-      tax_amount_snapshot?: components['schemas']['Money'];
-      line_total?: components['schemas']['Money'];
+      discount_amount: components['schemas']['Money'];
+      tax_rate_snapshot: components['schemas']['TaxRate'];
+      tax_amount_snapshot: components['schemas']['Money'];
+      line_total: components['schemas']['Money'];
     };
     SalesOrderDto: {
-      sales_order_id?: components['schemas']['Uuid'];
-      branch_id?: components['schemas']['Uuid'];
-      created_by_employee_id?: components['schemas']['Uuid'];
-      order_no?: string;
+      sales_order_id: components['schemas']['Uuid'];
+      branch_id: components['schemas']['Uuid'];
+      created_by_employee_id: components['schemas']['Uuid'];
+      order_no: string;
       /** @default POS */
       channel: string;
-      order_status?: components['schemas']['SalesOrderStatus'];
+      order_status: components['schemas']['SalesOrderStatus'];
       /** @description equals Organization base_currency */
-      currency_code?: string;
+      currency_code: string;
       estimated_subtotal?: components['schemas']['Money'];
       estimated_tax_total?: components['schemas']['Money'];
       estimated_grand_total?: components['schemas']['Money'];
-      created_at?: components['schemas']['Timestamp'];
-      completed_at?: components['schemas']['Timestamp'];
-      lines?: components['schemas']['SalesOrderLineDto'][];
+      created_at: components['schemas']['Timestamp'];
+      completed_at?: components['schemas']['Timestamp'] | null;
+      lines: components['schemas']['SalesOrderLineDto'][];
     };
     /**
      * @description FE provides only product identification and quantity. Price, tax,
@@ -1722,7 +1788,7 @@ export interface components {
     SalesOrderLineRequest: {
       product_id: components['schemas']['Uuid'];
       product_uom_id: components['schemas']['Uuid'];
-      entered_qty: components['schemas']['Numeric4'];
+      entered_qty: components['schemas']['PositiveNumeric4'];
     };
     SalesOrderLinesRequest: {
       lines: components['schemas']['SalesOrderLineRequest'][];
@@ -1733,67 +1799,67 @@ export interface components {
      *     Cashier full payment only; partial/credit rejected.
      */
     CompleteSalesOrderRequest: {
-      cash_tendered_amount: components['schemas']['Money'];
+      cash_tendered_amount: components['schemas']['PositiveMoney'];
       /** @enum {string} */
       method: 'CASH';
     };
     CompleteSalesOrderResultDto: {
-      sales_order?: components['schemas']['SalesOrderDto'];
-      invoice?: components['schemas']['SalesInvoiceDto'];
-      payment?: components['schemas']['SalesPaymentDto'];
-      inventory_txn?: components['schemas']['InventoryTxnDto'];
+      sales_order: components['schemas']['SalesOrderDto'];
+      invoice: components['schemas']['SalesInvoiceDto'];
+      payment: components['schemas']['SalesPaymentDto'];
+      inventory_txn: components['schemas']['InventoryTxnDto'];
     };
     /** @enum {string} */
     SalesInvoiceStatus: 'ISSUED';
     /** @enum {string} */
     SalesInvoicePaymentStatus: 'PAID' | 'PARTIALLY_REFUNDED' | 'REFUNDED';
     SalesInvoiceLineDto: {
-      invoice_line_id?: components['schemas']['Uuid'];
-      source_order_line_id?: components['schemas']['Uuid'];
-      product_id?: components['schemas']['Uuid'];
-      product_uom_id?: components['schemas']['Uuid'];
-      entered_qty?: components['schemas']['Numeric4'];
-      conversion_snapshot?: components['schemas']['Numeric6'];
-      quantity_base?: components['schemas']['Numeric4'];
-      unit_price_snapshot?: components['schemas']['Numeric4'];
-      discount_amount?: components['schemas']['Money'];
-      tax_rate_snapshot?: components['schemas']['TaxRate'];
-      tax_amount_snapshot?: components['schemas']['Money'];
-      net_amount?: components['schemas']['Money'];
+      invoice_line_id: components['schemas']['Uuid'];
+      source_order_line_id: components['schemas']['Uuid'];
+      product_id: components['schemas']['Uuid'];
+      product_uom_id: components['schemas']['Uuid'];
+      entered_qty: components['schemas']['PositiveNumeric4'];
+      conversion_snapshot: components['schemas']['PositiveNumeric6'];
+      quantity_base: components['schemas']['PositiveNumeric4'];
+      unit_price_snapshot: components['schemas']['NonNegativeNumeric4'];
+      discount_amount: components['schemas']['Money'];
+      tax_rate_snapshot: components['schemas']['TaxRate'];
+      tax_amount_snapshot: components['schemas']['Money'];
+      net_amount: components['schemas']['Money'];
       /** @description tax-inclusive */
-      line_total?: components['schemas']['Money'];
-      unit_cost_snapshot?: components['schemas']['Numeric4'];
+      line_total: components['schemas']['Money'];
+      unit_cost_snapshot: components['schemas']['NonNegativeNumeric4'];
     };
     SalesInvoiceDto: {
-      invoice_id?: components['schemas']['Uuid'];
-      sales_order_id?: components['schemas']['Uuid'];
-      branch_id?: components['schemas']['Uuid'];
-      invoice_no?: string;
-      status?: components['schemas']['SalesInvoiceStatus'];
-      currency_code?: string;
-      subtotal?: components['schemas']['Money'];
-      discount_total?: components['schemas']['Money'];
-      tax_total?: components['schemas']['Money'];
-      grand_total?: components['schemas']['Money'];
-      paid_amount?: components['schemas']['Money'];
-      refunded_amount?: components['schemas']['Money'];
-      payment_status?: components['schemas']['SalesInvoicePaymentStatus'];
-      issued_at?: components['schemas']['Timestamp'];
-      lines?: components['schemas']['SalesInvoiceLineDto'][];
+      invoice_id: components['schemas']['Uuid'];
+      sales_order_id: components['schemas']['Uuid'];
+      branch_id: components['schemas']['Uuid'];
+      invoice_no: string;
+      status: components['schemas']['SalesInvoiceStatus'];
+      currency_code: string;
+      subtotal: components['schemas']['Money'];
+      discount_total: components['schemas']['Money'];
+      tax_total: components['schemas']['Money'];
+      grand_total: components['schemas']['Money'];
+      paid_amount: components['schemas']['Money'];
+      refunded_amount: components['schemas']['Money'];
+      payment_status: components['schemas']['SalesInvoicePaymentStatus'];
+      issued_at: components['schemas']['Timestamp'];
+      lines: components['schemas']['SalesInvoiceLineDto'][];
       /** @description Linked cash payments */
       payments?: components['schemas']['SalesPaymentDto'][];
       returns_summary?: components['schemas']['SalesReturnDto'][];
     };
     SalesPaymentDto: {
-      payment_id?: components['schemas']['Uuid'];
-      invoice_id?: components['schemas']['Uuid'];
-      amount_due?: components['schemas']['Money'];
-      cash_tendered_amount?: components['schemas']['Money'];
-      change_amount?: components['schemas']['Money'];
+      payment_id: components['schemas']['Uuid'];
+      invoice_id: components['schemas']['Uuid'];
+      amount_due: components['schemas']['Money'];
+      cash_tendered_amount: components['schemas']['Money'];
+      change_amount: components['schemas']['Money'];
       /** @enum {string} */
-      method?: 'CASH';
-      received_by_employee_id?: components['schemas']['Uuid'];
-      paid_at?: components['schemas']['Timestamp'];
+      method: 'CASH';
+      received_by_employee_id: components['schemas']['Uuid'];
+      paid_at: components['schemas']['Timestamp'];
     };
     /** @enum {string} */
     ReturnDisposition: 'RESTOCK' | 'QUARANTINE' | 'SCRAP';
@@ -1802,16 +1868,16 @@ export interface components {
     /** @enum {string} */
     SalesRefundStatus: 'NOT_REFUNDED' | 'PARTIALLY_REFUNDED' | 'REFUNDED';
     SalesReturnLineDto: {
-      return_line_id?: components['schemas']['Uuid'];
-      invoice_line_id?: components['schemas']['Uuid'];
-      product_id?: components['schemas']['Uuid'];
+      return_line_id: components['schemas']['Uuid'];
+      invoice_line_id: components['schemas']['Uuid'];
+      product_id: components['schemas']['Uuid'];
       /** @description Server-derived from original sale */
-      batch_id?: components['schemas']['Uuid'];
+      batch_id: components['schemas']['Uuid'];
       /** @description Server-selected; callers do not choose. */
-      destination_location_id?: components['schemas']['Uuid'];
-      quantity_base?: components['schemas']['Numeric4'];
-      refund_amount?: components['schemas']['Money'];
-      disposition?: components['schemas']['ReturnDisposition'];
+      destination_location_id: components['schemas']['Uuid'];
+      quantity_base: components['schemas']['PositiveNumeric4'];
+      refund_amount: components['schemas']['Money'];
+      disposition: components['schemas']['ReturnDisposition'];
     };
     SalesReturnDto: {
       return_id?: components['schemas']['Uuid'];
@@ -1819,25 +1885,30 @@ export interface components {
       branch_id?: components['schemas']['Uuid'];
       return_no?: string;
       status?: components['schemas']['SalesReturnStatus'];
-      reason_code?: string | null;
+      reason_code: string;
       refund_amount?: components['schemas']['Money'];
       refund_status?: components['schemas']['SalesRefundStatus'];
       received_by_employee_id?: components['schemas']['Uuid'];
-      approved_by_employee_id?: components['schemas']['Uuid'];
+      approved_by_employee_id?: components['schemas']['Uuid'] | null;
       received_at?: components['schemas']['Timestamp'];
       lines?: components['schemas']['SalesReturnLineDto'][];
-      inventory_txn?: components['schemas']['InventoryTxnDto'];
+      /**
+       * @description Zero transactions for a non-restocking return, one SALES_RETURN_IN
+       *     when stock is restocked/quarantined, and up to two when RESTOCK
+       *     plus an additional SCRAP_OUT is required. Server-created only.
+       */
+      inventory_txns?: components['schemas']['InventoryTxnDto'][];
       refund?: components['schemas']['SalesRefundDto'];
     };
     SalesRefundDto: {
-      refund_id?: components['schemas']['Uuid'];
-      sales_return_id?: components['schemas']['Uuid'];
-      invoice_id?: components['schemas']['Uuid'];
-      amount?: components['schemas']['Money'];
+      refund_id: components['schemas']['Uuid'];
+      sales_return_id: components['schemas']['Uuid'];
+      invoice_id: components['schemas']['Uuid'];
+      amount: components['schemas']['Money'];
       /** @enum {string} */
-      method?: 'CASH';
-      processed_by_employee_id?: components['schemas']['Uuid'];
-      refunded_at?: components['schemas']['Timestamp'];
+      method: 'CASH';
+      processed_by_employee_id: components['schemas']['Uuid'];
+      refunded_at: components['schemas']['Timestamp'];
     };
     SalesReturnRequest: {
       invoice_id: components['schemas']['Uuid'];
@@ -1847,27 +1918,27 @@ export interface components {
        *     with authorization at the invoice branch, and not the cashier.
        *     When omitted, server records pending/posted per backend policy.
        */
-      approved_by_employee_id?: components['schemas']['Uuid'];
+      approved_by_employee_id?: components['schemas']['Uuid'] | null;
       lines: components['schemas']['SalesReturnLineRequest'][];
       /** @default true */
       refund_requested: boolean;
     };
     SalesReturnLineRequest: {
       invoice_line_id: components['schemas']['Uuid'];
-      quantity_base: components['schemas']['Numeric4'];
+      quantity_base: components['schemas']['PositiveNumeric4'];
       disposition: components['schemas']['ReturnDisposition'];
     };
     SupplierDto: {
-      supplier_id?: components['schemas']['Uuid'];
-      supplier_code?: string;
-      legal_name?: string;
+      supplier_id: components['schemas']['Uuid'];
+      supplier_code: string;
+      legal_name: string;
       tax_registration_number?: string | null;
       /** Format: email */
       contact_email?: string | null;
       phone?: string | null;
       address?: components['schemas']['AddressDto'];
-      default_lead_time_days?: number;
-      is_active?: boolean;
+      default_lead_time_days: number;
+      is_active: boolean;
       created_at?: components['schemas']['Timestamp'];
       updated_at?: components['schemas']['Timestamp'];
     };
@@ -1908,61 +1979,61 @@ export interface components {
     /** @enum {string} */
     PurchaseOrderPaymentStatus: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID';
     PurchaseOrderLineDto: {
-      po_line_id?: components['schemas']['Uuid'];
-      product_id?: components['schemas']['Uuid'];
-      product_uom_id?: components['schemas']['Uuid'];
-      entered_ordered_qty?: components['schemas']['Numeric4'];
-      conversion_snapshot?: components['schemas']['Numeric6'];
-      ordered_qty_base?: components['schemas']['Numeric4'];
+      po_line_id: components['schemas']['Uuid'];
+      product_id: components['schemas']['Uuid'];
+      product_uom_id: components['schemas']['Uuid'];
+      entered_ordered_qty: components['schemas']['PositiveNumeric4'];
+      conversion_snapshot: components['schemas']['PositiveNumeric6'];
+      ordered_qty_base: components['schemas']['PositiveNumeric4'];
       /** @description cumulative accepted quantity only (rejected excluded) */
-      received_qty_base?: components['schemas']['Numeric4'];
-      rejected_qty_base?: components['schemas']['Numeric4'];
-      cancelled_qty_base?: components['schemas']['Numeric4'];
+      received_qty_base: components['schemas']['NonNegativeNumeric4'];
+      rejected_qty_base: components['schemas']['NonNegativeNumeric4'];
+      cancelled_qty_base: components['schemas']['NonNegativeNumeric4'];
       /** @description ordered - accepted - cancelled */
-      readonly remaining_qty_base?: components['schemas']['Numeric4'];
-      unit_cost_entered?: components['schemas']['Numeric4'];
-      unit_cost_base?: components['schemas']['Numeric4'];
-      discount_amount?: components['schemas']['Money'];
-      tax_rate_snapshot?: components['schemas']['TaxRate'];
-      tax_amount?: components['schemas']['Money'];
+      readonly remaining_qty_base?: components['schemas']['NonNegativeNumeric4'];
+      unit_cost_entered: components['schemas']['NonNegativeNumeric4'];
+      unit_cost_base: components['schemas']['NonNegativeNumeric4'];
+      discount_amount: components['schemas']['Money'];
+      tax_rate_snapshot: components['schemas']['TaxRate'];
+      tax_amount: components['schemas']['Money'];
       /** @description line net, tax-exclusive */
-      line_total?: components['schemas']['Money'];
-      allocated_additional_cost?: components['schemas']['Money'];
+      line_total: components['schemas']['Money'];
+      allocated_additional_cost: components['schemas']['Money'];
       /** @default 90 */
       min_remaining_shelf_days: number;
     };
     PurchaseOrderDto: {
-      purchase_order_id?: components['schemas']['Uuid'];
-      po_no?: string;
-      supplier_id?: components['schemas']['Uuid'];
-      branch_id?: components['schemas']['Uuid'];
-      created_by_employee_id?: components['schemas']['Uuid'];
-      status?: components['schemas']['PurchaseOrderStatus'];
+      purchase_order_id: components['schemas']['Uuid'];
+      po_no: string;
+      supplier_id: components['schemas']['Uuid'];
+      branch_id: components['schemas']['Uuid'];
+      created_by_employee_id: components['schemas']['Uuid'];
+      status: components['schemas']['PurchaseOrderStatus'];
       /** Format: date */
       expected_on?: string | null;
-      currency_code?: string;
-      subtotal?: components['schemas']['Money'];
-      tax_total?: components['schemas']['Money'];
-      additional_costs?: components['schemas']['Money'];
-      total_amount?: components['schemas']['Money'];
-      paid_amount?: components['schemas']['Money'];
+      currency_code: string;
+      subtotal: components['schemas']['Money'];
+      tax_total: components['schemas']['Money'];
+      additional_costs: components['schemas']['Money'];
+      total_amount: components['schemas']['Money'];
+      paid_amount: components['schemas']['Money'];
       /** @description total - paid */
       readonly outstanding_amount?: components['schemas']['Money'];
-      payment_status?: components['schemas']['PurchaseOrderPaymentStatus'];
-      ordered_at?: components['schemas']['Timestamp'];
-      lines?: components['schemas']['PurchaseOrderLineDto'][];
+      payment_status: components['schemas']['PurchaseOrderPaymentStatus'];
+      ordered_at?: components['schemas']['Timestamp'] | null;
+      lines: components['schemas']['PurchaseOrderLineDto'][];
       created_at?: components['schemas']['Timestamp'];
       updated_at?: components['schemas']['Timestamp'];
     };
     PurchaseOrderLineRequest: {
       product_id: components['schemas']['Uuid'];
       product_uom_id: components['schemas']['Uuid'];
-      entered_ordered_qty: components['schemas']['Numeric4'];
-      unit_cost_entered: components['schemas']['Numeric4'];
+      entered_ordered_qty: components['schemas']['PositiveNumeric4'];
+      unit_cost_entered: components['schemas']['NonNegativeNumeric4'];
       /** @default 0.00 */
       discount_amount: components['schemas']['Money'];
       /** @description Defaults to PRODUCT.tax_rate at server */
-      tax_rate_snapshot?: components['schemas']['TaxRate'];
+      tax_rate_snapshot?: components['schemas']['TaxRate'] | null;
       /** @default 90 */
       min_remaining_shelf_days: number;
     };
@@ -2006,19 +2077,28 @@ export interface components {
       lines: components['schemas']['ReceiveLineRequest'][];
     };
     /**
-     * @description received_qty_base = accepted_qty_base + rejected_qty_base
-     *     accepted quantity accumulates to PO received_qty_base; rejected
+     * @description Quantities are entered in `product_uom_id`; the server normalizes them
+     *     to base UOM. `entered_accepted_qty` defaults to `entered_qty` and
+     *     `entered_rejected_qty` defaults to 0. If normalized `*_qty_base`
+     *     fields are supplied, the server validates that they match the entered
+     *     quantities and the equation received = accepted + rejected.
+     *     Accepted quantity accumulates to PO received_qty_base; rejected
      *     quantity stays replaceable/cancellable; batch supplied per line.
      */
     ReceiveLineRequest: {
       po_line_id: components['schemas']['Uuid'];
       product_id: components['schemas']['Uuid'];
+      /** @description Entered UOM for the entered_* quantity fields. */
       product_uom_id: components['schemas']['Uuid'];
-      /** @description accepted + rejected */
-      received_qty_base: components['schemas']['Numeric4'];
-      accepted_qty_base: components['schemas']['Numeric4'];
-      /** @default 0.0000 */
-      rejected_qty_base: components['schemas']['Numeric4'];
+      entered_qty: components['schemas']['PositiveNumeric4'];
+      entered_accepted_qty?: components['schemas']['NonNegativeNumeric4'];
+      entered_rejected_qty?: components['schemas']['NonNegativeNumeric4'];
+      /** @description Optional client echo of normalized accepted + rejected; server-computed when omitted. */
+      received_qty_base?: components['schemas']['NonNegativeNumeric4'];
+      /** @description Optional client echo of normalized accepted quantity; server-computed when omitted. */
+      accepted_qty_base?: components['schemas']['NonNegativeNumeric4'];
+      /** @description Optional client echo of normalized rejected quantity; server-computed when omitted. */
+      rejected_qty_base?: components['schemas']['NonNegativeNumeric4'];
       batch_number: string;
       /** Format: date */
       manufactured_on?: string | null;
@@ -2027,17 +2107,23 @@ export interface components {
       /** @description Required for authorized shelf-life exception. */
       override_reason?: string | null;
     };
+    ReceiveLineDto: {
+      po_line_id: components['schemas']['Uuid'];
+      product_id: components['schemas']['Uuid'];
+      product_uom_id: components['schemas']['Uuid'];
+      entered_qty: components['schemas']['PositiveNumeric4'];
+      entered_accepted_qty: components['schemas']['NonNegativeNumeric4'];
+      entered_rejected_qty: components['schemas']['NonNegativeNumeric4'];
+      received_qty_base: components['schemas']['NonNegativeNumeric4'];
+      accepted_qty_base: components['schemas']['NonNegativeNumeric4'];
+      rejected_qty_base: components['schemas']['NonNegativeNumeric4'];
+      remaining_qty_base: components['schemas']['NonNegativeNumeric4'];
+      batch_id: components['schemas']['Uuid'];
+    };
     PurchaseReceiptResultDto: {
-      inventory_txn_id?: components['schemas']['Uuid'];
-      purchase_order_status?: components['schemas']['PurchaseOrderStatus'];
-      lines?: {
-        po_line_id?: components['schemas']['Uuid'];
-        product_id?: components['schemas']['Uuid'];
-        accepted_qty_base?: components['schemas']['Numeric4'];
-        rejected_qty_base?: components['schemas']['Numeric4'];
-        remaining_qty_base?: components['schemas']['Numeric4'];
-        batch_id?: components['schemas']['Uuid'];
-      }[];
+      inventory_txn_id: components['schemas']['Uuid'];
+      purchase_order_status: components['schemas']['PurchaseOrderStatus'];
+      lines: components['schemas']['ReceiveLineDto'][];
       trace_id?: string;
     };
     /**
@@ -2047,8 +2133,8 @@ export interface components {
     RecordSupplierPaymentRequest: {
       supplier_id: components['schemas']['Uuid'];
       purchase_order_id: components['schemas']['Uuid'];
-      /** @description >0 and <= outstanding */
-      amount: components['schemas']['Money'];
+      /** @description Must be >0 and <= outstanding PO balance */
+      amount: components['schemas']['PositiveMoney'];
       currency_code: string;
       /** @enum {string} */
       method: 'CASH';
@@ -2056,17 +2142,17 @@ export interface components {
       note?: string | null;
     };
     SupplierPaymentDto: {
-      supplier_payment_id?: components['schemas']['Uuid'];
-      supplier_id?: components['schemas']['Uuid'];
-      purchase_order_id?: components['schemas']['Uuid'];
-      amount?: components['schemas']['Money'];
-      currency_code?: string;
+      supplier_payment_id: components['schemas']['Uuid'];
+      supplier_id: components['schemas']['Uuid'];
+      purchase_order_id: components['schemas']['Uuid'];
+      amount: components['schemas']['Money'];
+      currency_code: string;
       /** @enum {string} */
-      method?: 'CASH';
+      method: 'CASH';
       payment_reference?: string | null;
       note?: string | null;
-      paid_at?: components['schemas']['Timestamp'];
-      recorded_by_employee_id?: components['schemas']['Uuid'];
+      paid_at: components['schemas']['Timestamp'];
+      recorded_by_employee_id: components['schemas']['Uuid'];
       po_paid_amount?: components['schemas']['Money'];
       po_outstanding_amount?: components['schemas']['Money'];
       po_payment_status?: components['schemas']['PurchaseOrderPaymentStatus'];
@@ -2074,34 +2160,33 @@ export interface components {
     /** @enum {string} */
     VendorReturnStatus: 'DRAFT' | 'POSTED' | 'CANCELLED';
     VendorReturnLineDto: {
-      vendor_return_line_id?: components['schemas']['Uuid'];
-      purchase_order_line_id?: components['schemas']['Uuid'];
-      product_id?: components['schemas']['Uuid'];
-      batch_id?: components['schemas']['Uuid'];
-      location_id?: components['schemas']['Uuid'];
-      /** @description >0 */
-      quantity_base?: components['schemas']['Numeric4'];
-      unit_cost_snapshot?: components['schemas']['Numeric4'];
-      reason_code?: string | null;
+      vendor_return_line_id: components['schemas']['Uuid'];
+      purchase_order_line_id: components['schemas']['Uuid'];
+      product_id: components['schemas']['Uuid'];
+      batch_id: components['schemas']['Uuid'];
+      location_id: components['schemas']['Uuid'];
+      quantity_base: components['schemas']['PositiveNumeric4'];
+      unit_cost_snapshot: components['schemas']['NonNegativeNumeric4'];
+      reason_code?: string;
     };
     VendorReturnDto: {
-      vendor_return_id?: components['schemas']['Uuid'];
-      return_no?: string;
-      supplier_id?: components['schemas']['Uuid'];
-      branch_id?: components['schemas']['Uuid'];
-      created_by_employee_id?: components['schemas']['Uuid'];
-      status?: components['schemas']['VendorReturnStatus'];
-      reason_code?: string | null;
+      vendor_return_id: components['schemas']['Uuid'];
+      return_no: string;
+      supplier_id: components['schemas']['Uuid'];
+      branch_id: components['schemas']['Uuid'];
+      created_by_employee_id: components['schemas']['Uuid'];
+      status: components['schemas']['VendorReturnStatus'];
+      reason_code?: string;
       note?: string | null;
-      created_at?: components['schemas']['Timestamp'];
-      posted_at?: components['schemas']['Timestamp'];
-      lines?: components['schemas']['VendorReturnLineDto'][];
-      inventory_txn?: components['schemas']['InventoryTxnDto'];
+      created_at: components['schemas']['Timestamp'];
+      posted_at?: components['schemas']['Timestamp'] | null;
+      lines: components['schemas']['VendorReturnLineDto'][];
+      inventory_txn?: components['schemas']['InventoryTxnDto'] | null;
     };
     CreateVendorReturnRequest: {
       supplier_id: components['schemas']['Uuid'];
       branch_id: components['schemas']['Uuid'];
-      reason_code?: string | null;
+      reason_code: string;
       note?: string | null;
       lines: components['schemas']['VendorReturnLineRequest'][];
     };
@@ -2109,8 +2194,8 @@ export interface components {
       purchase_order_line_id: components['schemas']['Uuid'];
       batch_id: components['schemas']['Uuid'];
       location_id: components['schemas']['Uuid'];
-      quantity_base: components['schemas']['Numeric4'];
-      reason_code?: string | null;
+      quantity_base: components['schemas']['PositiveNumeric4'];
+      reason_code: string;
     };
     PagedBranchDto: components['schemas']['PagedResult'] & {
       items?: components['schemas']['BranchDto'][];
@@ -2189,6 +2274,15 @@ export interface components {
         'application/json': components['schemas']['ApiError'];
       };
     };
+    /** @description Resource/token is expired, consumed, or no longer available */
+    Gone: {
+      headers: {
+        [name: string]: unknown;
+      };
+      content: {
+        'application/json': components['schemas']['ApiError'];
+      };
+    };
     /** @description Resource not in scope or does not exist */
     NotFound: {
       headers: {
@@ -2238,8 +2332,6 @@ export interface components {
   parameters: {
     /** @description Stable per-mutation key (UUID or opaque, max 100 chars). Same key with same payload hash replays the original stored response; same key with a DIFFERENT payload → 409 IDEMPOTENCY_MISMATCH. */
     idempotencyKey: string;
-    /** @description W3C trace propagation on every call. */
-    traceparent: string;
     /** @description Opaque continuation cursor from a previous PagedResult response. */
     cursor: string;
     /** @description Page size (server-defined default and max). */
@@ -2250,8 +2342,6 @@ export interface components {
     branchIdQuery: string;
     /** @description Required branch filter; must be within caller branch scope. */
     branchIdQueryRequired: string;
-    /** @description Never trusted from the client; only used in provisioner URLs (if any). */
-    organizationId: string;
     branchId: string;
     userId: string;
     employeeId: string;
@@ -2333,7 +2423,10 @@ export interface operations {
   authLogout: {
     parameters: {
       query?: never;
-      header?: never;
+      header: {
+        /** @description Stable per-mutation key (UUID or opaque, max 100 chars). Same key with same payload hash replays the original stored response; same key with a DIFFERENT payload → 409 IDEMPOTENCY_MISMATCH. */
+        'Idempotency-Key': components['parameters']['idempotencyKey'];
+      };
       path?: never;
       cookie?: never;
     };
@@ -2352,6 +2445,7 @@ export interface operations {
       };
       400: components['responses']['MalformedRequest'];
       401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       500: components['responses']['InternalError'];
     };
   };
@@ -2375,6 +2469,7 @@ export interface operations {
       };
       400: components['responses']['MalformedRequest'];
       401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       500: components['responses']['InternalError'];
     };
   };
@@ -2403,7 +2498,10 @@ export interface operations {
   createOrganization: {
     parameters: {
       query?: never;
-      header?: never;
+      header: {
+        /** @description Stable per-mutation key (UUID or opaque, max 100 chars). Same key with same payload hash replays the original stored response; same key with a DIFFERENT payload → 409 IDEMPOTENCY_MISMATCH. */
+        'Idempotency-Key': components['parameters']['idempotencyKey'];
+      };
       path?: never;
       cookie?: never;
     };
@@ -2423,7 +2521,9 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
       403: components['responses']['Forbidden'];
+      409: components['responses']['Conflict'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
     };
@@ -2454,6 +2554,7 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
       403: components['responses']['ForbiddenBranch'];
       500: components['responses']['InternalError'];
     };
@@ -2484,6 +2585,7 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
       403: components['responses']['ForbiddenBranch'];
       409: components['responses']['Conflict'];
       422: components['responses']['ValidationError'];
@@ -2511,6 +2613,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       404: components['responses']['NotFound'];
       500: components['responses']['InternalError'];
     };
@@ -2543,6 +2647,7 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
       403: components['responses']['ForbiddenBranch'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
@@ -2572,6 +2677,7 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
       403: components['responses']['ForbiddenBranch'];
       500: components['responses']['InternalError'];
     };
@@ -2579,7 +2685,10 @@ export interface operations {
   redeemBranchEnrollment: {
     parameters: {
       query?: never;
-      header?: never;
+      header: {
+        /** @description Stable per-mutation key (UUID or opaque, max 100 chars). Same key with same payload hash replays the original stored response; same key with a DIFFERENT payload → 409 IDEMPOTENCY_MISMATCH. */
+        'Idempotency-Key': components['parameters']['idempotencyKey'];
+      };
       path?: never;
       cookie?: never;
     };
@@ -2600,13 +2709,7 @@ export interface operations {
       };
       400: components['responses']['MalformedRequest'];
       401: components['responses']['Unauthorized'];
-      /** @description Token expired or already used */
-      410: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content?: never;
-      };
+      410: components['responses']['Gone'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
     };
@@ -2635,6 +2738,7 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
       403: components['responses']['Forbidden'];
       500: components['responses']['InternalError'];
     };
@@ -2665,6 +2769,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       409: components['responses']['Conflict'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
@@ -2691,6 +2797,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       404: components['responses']['NotFound'];
       500: components['responses']['InternalError'];
     };
@@ -2723,6 +2831,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
     };
@@ -2753,6 +2863,7 @@ export interface operations {
         content?: never;
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
       403: components['responses']['Forbidden'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
@@ -2780,6 +2891,8 @@ export interface operations {
         content?: never;
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       404: components['responses']['NotFound'];
       500: components['responses']['InternalError'];
     };
@@ -2810,6 +2923,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       500: components['responses']['InternalError'];
     };
   };
@@ -2839,6 +2954,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
     };
@@ -2864,6 +2981,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       404: components['responses']['NotFound'];
       500: components['responses']['InternalError'];
     };
@@ -2896,6 +3015,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
     };
@@ -2926,6 +3047,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       500: components['responses']['InternalError'];
     };
   };
@@ -2955,6 +3078,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       409: components['responses']['Conflict'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
@@ -2981,6 +3106,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       404: components['responses']['NotFound'];
       500: components['responses']['InternalError'];
     };
@@ -3013,6 +3140,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
     };
@@ -3046,6 +3175,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       500: components['responses']['InternalError'];
     };
   };
@@ -3075,6 +3206,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       409: components['responses']['Conflict'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
@@ -3101,6 +3234,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       404: components['responses']['NotFound'];
       500: components['responses']['InternalError'];
     };
@@ -3133,6 +3268,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
     };
@@ -3158,6 +3295,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       500: components['responses']['InternalError'];
     };
   };
@@ -3189,6 +3328,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       409: components['responses']['Conflict'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
@@ -3223,6 +3364,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       409: components['responses']['Conflict'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
@@ -3252,6 +3395,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       404: components['responses']['NotFound'];
       500: components['responses']['InternalError'];
     };
@@ -3285,6 +3430,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
     };
@@ -3318,6 +3465,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       500: components['responses']['InternalError'];
     };
   };
@@ -3347,6 +3496,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
     };
@@ -3372,6 +3523,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       404: components['responses']['NotFound'];
       500: components['responses']['InternalError'];
     };
@@ -3404,6 +3557,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
     };
@@ -3436,6 +3591,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       500: components['responses']['InternalError'];
     };
   };
@@ -3468,6 +3625,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       500: components['responses']['InternalError'];
     };
   };
@@ -3501,6 +3660,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       500: components['responses']['InternalError'];
     };
   };
@@ -3525,6 +3686,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       404: components['responses']['NotFound'];
       500: components['responses']['InternalError'];
     };
@@ -3555,19 +3718,19 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       409: components['responses']['Conflict'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
     };
   };
-  postOrReverseInventoryAdjustment: {
+  postInventoryAdjustmentById: {
     parameters: {
       query?: never;
       header: {
         /** @description Stable per-mutation key (UUID or opaque, max 100 chars). Same key with same payload hash replays the original stored response; same key with a DIFFERENT payload → 409 IDEMPOTENCY_MISMATCH. */
         'Idempotency-Key': components['parameters']['idempotencyKey'];
-        /** @description POST (default) commits a DRAFT; REVERSE posts a reversal of this POSTED transaction as a new linked txn. */
-        'X-ERP-Action'?: 'POST' | 'REVERSE';
       };
       path: {
         txnId: components['parameters']['txnId'];
@@ -3586,6 +3749,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       409: components['responses']['Conflict'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
@@ -3605,7 +3770,7 @@ export interface operations {
     };
     requestBody: {
       content: {
-        'application/json': components['schemas']['InventoryTxnRequest'];
+        'application/json': components['schemas']['InventoryTxnPatchRequest'];
       };
     };
     responses: {
@@ -3619,6 +3784,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       409: components['responses']['Conflict'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
@@ -3646,6 +3813,8 @@ export interface operations {
         content?: never;
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       409: components['responses']['Conflict'];
       500: components['responses']['InternalError'];
     };
@@ -3679,6 +3848,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       500: components['responses']['InternalError'];
     };
   };
@@ -3708,6 +3879,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       409: components['responses']['Conflict'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
@@ -3734,6 +3907,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       404: components['responses']['NotFound'];
       500: components['responses']['InternalError'];
     };
@@ -3766,6 +3941,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       409: components['responses']['Conflict'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
@@ -3799,6 +3976,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       /** @description OUT_OF_STOCK (typed, per-line) / INVALID_STATE_TRANSITION / IDEMPOTENCY_MISMATCH */
       409: {
         headers: {
@@ -3834,6 +4013,8 @@ export interface operations {
         content?: never;
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       409: components['responses']['Conflict'];
       500: components['responses']['InternalError'];
     };
@@ -3867,6 +4048,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       500: components['responses']['InternalError'];
     };
   };
@@ -3891,6 +4074,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       404: components['responses']['NotFound'];
       500: components['responses']['InternalError'];
     };
@@ -3924,6 +4109,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       500: components['responses']['InternalError'];
     };
   };
@@ -3953,6 +4140,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       409: components['responses']['Conflict'];
       /** @description Expiry / 14-day / over-return / approver policy violations */
       422: {
@@ -3987,6 +4176,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       404: components['responses']['NotFound'];
       500: components['responses']['InternalError'];
     };
@@ -4017,6 +4208,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       500: components['responses']['InternalError'];
     };
   };
@@ -4046,6 +4239,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       409: components['responses']['Conflict'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
@@ -4072,6 +4267,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       404: components['responses']['NotFound'];
       500: components['responses']['InternalError'];
     };
@@ -4104,6 +4301,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
     };
@@ -4136,6 +4335,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       409: components['responses']['Conflict'];
       500: components['responses']['InternalError'];
     };
@@ -4170,6 +4371,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       500: components['responses']['InternalError'];
     };
   };
@@ -4199,6 +4402,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       409: components['responses']['Conflict'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
@@ -4225,40 +4430,9 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       404: components['responses']['NotFound'];
-      500: components['responses']['InternalError'];
-    };
-  };
-  cancelPurchaseOrder: {
-    parameters: {
-      query?: never;
-      header: {
-        /** @description Stable per-mutation key (UUID or opaque, max 100 chars). Same key with same payload hash replays the original stored response; same key with a DIFFERENT payload → 409 IDEMPOTENCY_MISMATCH. */
-        'Idempotency-Key': components['parameters']['idempotencyKey'];
-      };
-      path: {
-        purchaseOrderId: components['parameters']['purchaseOrderId'];
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['CancelPurchaseOrderRequest'];
-      };
-    };
-    responses: {
-      /** @description Cancelled PO (CANCELLED or remaining-cancelled transition) */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['PurchaseOrderDto'];
-        };
-      };
-      400: components['responses']['MalformedRequest'];
-      409: components['responses']['Conflict'];
-      422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
     };
   };
@@ -4290,6 +4464,43 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
+      409: components['responses']['Conflict'];
+      422: components['responses']['ValidationError'];
+      500: components['responses']['InternalError'];
+    };
+  };
+  cancelPurchaseOrder: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Stable per-mutation key (UUID or opaque, max 100 chars). Same key with same payload hash replays the original stored response; same key with a DIFFERENT payload → 409 IDEMPOTENCY_MISMATCH. */
+        'Idempotency-Key': components['parameters']['idempotencyKey'];
+      };
+      path: {
+        purchaseOrderId: components['parameters']['purchaseOrderId'];
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['CancelPurchaseOrderRequest'];
+      };
+    };
+    responses: {
+      /** @description Cancelled PO (CANCELLED or remaining-cancelled transition) */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['PurchaseOrderDto'];
+        };
+      };
+      400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       409: components['responses']['Conflict'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
@@ -4319,6 +4530,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       409: components['responses']['Conflict'];
       500: components['responses']['InternalError'];
     };
@@ -4351,6 +4564,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       409: components['responses']['Conflict'];
       500: components['responses']['InternalError'];
     };
@@ -4383,6 +4598,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       409: components['responses']['Conflict'];
       /** @description EXPIRY_POLICY_VIOLATION / shelf-life / quantity policy */
       422: {
@@ -4424,6 +4641,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       409: components['responses']['Conflict'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
@@ -4455,6 +4674,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       409: components['responses']['Conflict'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
@@ -4481,6 +4702,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       404: components['responses']['NotFound'];
       500: components['responses']['InternalError'];
     };
@@ -4512,6 +4735,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       500: components['responses']['InternalError'];
     };
   };
@@ -4541,6 +4766,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
     };
@@ -4566,6 +4793,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       404: components['responses']['NotFound'];
       500: components['responses']['InternalError'];
     };
@@ -4594,6 +4823,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       409: components['responses']['Conflict'];
       500: components['responses']['InternalError'];
     };
@@ -4622,6 +4853,8 @@ export interface operations {
         };
       };
       400: components['responses']['MalformedRequest'];
+      401: components['responses']['Unauthorized'];
+      403: components['responses']['Forbidden'];
       409: components['responses']['Conflict'];
       422: components['responses']['ValidationError'];
       500: components['responses']['InternalError'];
