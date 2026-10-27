@@ -37,6 +37,12 @@ public sealed class Branch
 
     public void Deactivate() { IsActive = false; UpdatedAt = DateTimeOffset.UtcNow; }
 
+    public void SetActive(bool isActive)
+    {
+        IsActive = isActive;
+        UpdatedAt = DateTimeOffset.UtcNow;
+    }
+
     private static void ValidateName(string name)
     {
         if (string.IsNullOrWhiteSpace(name) || name.Trim().Length > 150) throw new ArgumentException("Branch name is required and cannot exceed 150 characters.", nameof(name));

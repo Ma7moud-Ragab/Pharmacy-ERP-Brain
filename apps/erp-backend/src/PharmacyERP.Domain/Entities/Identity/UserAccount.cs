@@ -64,6 +64,12 @@ public sealed class UserAccount
 
     public void Deactivate() { IsActive = false; UpdatedAt = DateTimeOffset.UtcNow; }
 
+    public void SetActive(bool isActive)
+    {
+        IsActive = isActive;
+        UpdatedAt = DateTimeOffset.UtcNow;
+    }
+
     private static void ValidateRoleAndScope(UserRole role, BranchScope scope)
     {
         if (!Enum.IsDefined(role)) throw new ArgumentOutOfRangeException(nameof(role));

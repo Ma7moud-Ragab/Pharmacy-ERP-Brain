@@ -1,0 +1,55 @@
+diff --git a/apps/erp-backend/src/PharmacyERP.Domain/Entities/Identity/Branch.cs b/apps/erp-backend/src/PharmacyERP.Domain/Entities/Identity/Branch.cs
+--- a/apps/erp-backend/src/PharmacyERP.Domain/Entities/Identity/Branch.cs
++++ b/apps/erp-backend/src/PharmacyERP.Domain/Entities/Identity/Branch.cs
+@@ -38,3 +38,9 @@
+     public void Deactivate() { IsActive = false; UpdatedAt = DateTimeOffset.UtcNow; }
+ 
++    public void SetActive(bool isActive)
++    {
++        IsActive = isActive;
++        UpdatedAt = DateTimeOffset.UtcNow;
++    }
++
+     private static void ValidateName(string name)
+     {
+diff --git a/apps/erp-backend/src/PharmacyERP.Domain/Entities/Identity/Employee.cs b/apps/erp-backend/src/PharmacyERP.Domain/Entities/Identity/Employee.cs
+--- a/apps/erp-backend/src/PharmacyERP.Domain/Entities/Identity/Employee.cs
++++ b/apps/erp-backend/src/PharmacyERP.Domain/Entities/Identity/Employee.cs
+@@ -39,2 +39,23 @@
+     public void Deactivate() { IsActive = false; UpdatedAt = DateTimeOffset.UtcNow; }
++
++    public void UpdateDetails(string fullName, string? email, string? phone, string jobTitle, Address address)
++    {
++        if (string.IsNullOrWhiteSpace(fullName) || fullName.Trim().Length > 150) throw new ArgumentException("Full name is required and cannot exceed 150 characters.", nameof(fullName));
++        if (email?.Length > 254) throw new ArgumentException("Email cannot exceed 254 characters.", nameof(email));
++        if (phone?.Length > 30) throw new ArgumentException("Phone cannot exceed 30 characters.", nameof(phone));
++        if (string.IsNullOrWhiteSpace(jobTitle) || jobTitle.Trim().Length > 80) throw new ArgumentException("Job title is required and cannot exceed 80 characters.", nameof(jobTitle));
++        ArgumentNullException.ThrowIfNull(address);
++        FullName = fullName.Trim();
++        Email = string.IsNullOrWhiteSpace(email) ? null : email.Trim();
++        Phone = string.IsNullOrWhiteSpace(phone) ? null : phone.Trim();
++        JobTitle = jobTitle.Trim();
++        Address = address;
++        UpdatedAt = DateTimeOffset.UtcNow;
++    }
++
++    public void SetActive(bool isActive)
++    {
++        IsActive = isActive;
++        UpdatedAt = DateTimeOffset.UtcNow;
++    }
+ }
+diff --git a/apps/erp-backend/src/PharmacyERP.Domain/Entities/Identity/UserAccount.cs b/apps/erp-backend/src/PharmacyERP.Domain/Entities/Identity/UserAccount.cs
+--- a/apps/erp-backend/src/PharmacyERP.Domain/Entities/Identity/UserAccount.cs
++++ b/apps/erp-backend/src/PharmacyERP.Domain/Entities/Identity/UserAccount.cs
+@@ -65,3 +65,9 @@
+     public void Deactivate() { IsActive = false; UpdatedAt = DateTimeOffset.UtcNow; }
+ 
++    public void SetActive(bool isActive)
++    {
++        IsActive = isActive;
++        UpdatedAt = DateTimeOffset.UtcNow;
++    }
++
+     private static void ValidateRoleAndScope(UserRole role, BranchScope scope)
+     {

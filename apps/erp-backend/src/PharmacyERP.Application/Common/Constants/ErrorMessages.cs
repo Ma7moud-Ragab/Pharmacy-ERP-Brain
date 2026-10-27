@@ -30,4 +30,18 @@ public static class ErrorMessages
     public const string CategorySelfParent = "A product category cannot be set as its own parent.";
     public const string HistoricalUomModificationForbidden = "Cannot modify base UOM or tracking policy for a product that has existing stock balances or posted transaction history.";
     public const string InvalidBaseUomInvariant = "The product must have exactly one active base UOM with a conversion factor of 1 matching its base UOM code.";
+
+    // 7. Identity & Authentication
+    public const string InvalidCredentials = "The organization code, username, or password is invalid.";
+    public const string AccountInactive = "The user account or its employee record is inactive.";
+    public const string AccountLocked = "The account is temporarily locked. Try again after the lockout period.";
+    public const string DuplicateOrganizationCode = "An organization with this code already exists.";
+    public const string DuplicateBranchCode = "A branch with this code already exists in this organization.";
+    public const string DuplicateEmployeeNo = "An employee with this number already exists in this branch.";
+    public const string DuplicateUsername = "A user with this username already exists in this organization.";
+    public const string EmployeeAlreadyHasAccount = "This employee already has a user account.";
+    public const string InvalidRefreshToken = "The refresh token is invalid, expired, revoked, or has already been used.";
+    public const string InvalidEnrollmentToken = "The enrollment token is invalid, expired, or has already been used.";
+    public const string InvalidOrganizationTimeZone = "The specified time zone is invalid.";
+    public const string InvalidBranchSelection = "One or more selected branches do not belong to this organization or are inactive.";
 }
