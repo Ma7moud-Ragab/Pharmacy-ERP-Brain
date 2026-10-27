@@ -1,10 +1,7 @@
-﻿
+﻿using System.Text.Json.Serialization;
 
-using System.Text.Json.Serialization;
+namespace PharmacyERP.Application.Common.DTOs;
 
-namespace PharmacyERP.Application.Common.DTOs
-{
-    public sealed record ApiErrorEnvelopeDto(
+public sealed record ApiErrorEnvelopeDto(
     [property: JsonPropertyName("error")] ApiErrorBodyDto Error
 );
-}

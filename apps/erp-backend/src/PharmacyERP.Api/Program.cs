@@ -1,4 +1,5 @@
 
+using PharmacyERP.Api.Middleware;
 using PharmacyERP.Application;
 using PharmacyERP.Infrastructure;
 
@@ -27,9 +28,7 @@ namespace PharmacyERP.Api
                     options.SwaggerEndpoint("/swagger/v1/swagger.json", "Pharmacy ERP API v1");
                 });
             }
-
-            app.UseHttpsRedirection();
-            app.UseAuthorization();
+            app.UsePharmacyErpMiddlewares();
 
             app.MapControllers();
 

@@ -18,5 +18,10 @@ public class OutboxEventCursorConfiguration : IEntityTypeConfiguration<OutboxEve
         builder.Property(x => x.OrganizationId).HasColumnName("organization_id");
         builder.Property(x => x.LastEventSequence).HasColumnName("last_event_sequence").HasColumnType("bigint").HasDefaultValue(0L).IsRequired();
         builder.Property(x => x.UpdatedAt).HasColumnName("updated_at").HasColumnType("timestamptz").IsRequired();
+
+        builder.HasOne(x => x.Organization)
+               .WithOne()
+               .HasForeignKey<OutboxEventCursor>(x => x.OrganizationId)
+               .OnDelete(DeleteBehavior.Restrict);
     }
 }

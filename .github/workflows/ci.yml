@@ -47,22 +47,130 @@ jobs:
       #   run: npm run build
       #   working-directory: ./apps/erp-frontend
 
-  # 3. AI Brain (Python/FastAPI) Build and Test Pipeline
+  # 3. AI Brain: brain_db migrations, generator drift and the 41 integration/isolation tests (Stage 6)
   brain-ci:
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 ships PostgreSQL 16; pinned (not ubuntu-latest) so the major version cannot change under the tests.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"   # no __pycache__ in the checkout, so the drift check sees only real changes
+    defaults:
+      run:
+        shell: bash
+        working-directory: apps/brain/brain_db
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Python 3.11
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # Uncomment the following lines when the Python code is pushed
-      # - name: Install dependencies
-      #   run: pip install -r requirements.txt
-      #   working-directory: ./apps/brain
+      - name: Install pinned test dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-test.txt
+
+      - name: brain/ports.py is the recorded copy of contracts/internal/brain_ports.py (D-6b)
+        working-directory: apps/brain
+        run: echo "695bb0c3d2ee93fa4f214ef7e6f2f0e675573e70485db1b7bfc26cac532a1dcf  brain/ports.py" | sha256sum -c -
+
+      - name: CI-only role and CREATEROLE never appear in deployment configuration
+        working-directory: .
+        run: |
+          # -i: SQL keywords are case-insensitive. grep exit 1 = no match; 2 (missing/unreadable path) must fail, not pass.
+          rc=0; grep -rIni -E 'bb_admin|CREATEROLE' infrastructure .env.example || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::bb_admin or CREATEROLE found in deployment configuration; they are CI-only (D-6c)"; exit 1
+          elif [ "$rc" -ne 1 ]; then
+            echo "::error::could not scan infrastructure/ and .env.example (grep exit $rc)"; exit 1
+          fi
+
+      - name: Start a disposable PostgreSQL 16 (loopback TCP only, random per-job passwords)
+        run: |
+          set -euo pipefail
+          PGBIN=/usr/lib/postgresql/16/bin
+          SU_PW=$(openssl rand -hex 24); ADMIN_PW=$(openssl rand -hex 24); OWNER_PW=$(openssl rand -hex 24); ROLE_PW=$(openssl rand -hex 24)
+          for v in "$SU_PW" "$ADMIN_PW" "$OWNER_PW" "$ROLE_PW"; do echo "::add-mask::$v"; done
+          PGDATA=$(sudo -u postgres mktemp -d)
+          PWFILE=$(sudo -u postgres mktemp)
+          printf '%s' "$SU_PW" | sudo -u postgres tee "$PWFILE" >/dev/null
+          sudo -u postgres "$PGBIN/initdb" -D "$PGDATA" -U postgres --pwfile="$PWFILE" \
+            --auth-local=scram-sha-256 --auth-host=scram-sha-256 >/dev/null
+          sudo rm -f "$PWFILE"
+          # No Unix socket, TCP on 127.0.0.1 only: nothing outside this runner can reach the server.
+          sudo -u postgres "$PGBIN/pg_ctl" -D "$PGDATA" -l "$PGDATA/server.log" -w \
+            -o "-c listen_addresses=127.0.0.1 -c port=5432 -c unix_socket_directories=''" start
+          export PGPASSWORD="$SU_PW"
+          SU="host=127.0.0.1 port=5432 user=postgres dbname=postgres"
+          test "$(psql "$SU" -tAc "SELECT current_setting('server_version_num')::int / 10000")" = 16
+          # The only statements that run as a superuser (D-6c). Everything after this uses bb_admin or brain_migrator.
+          psql "$SU" -v ON_ERROR_STOP=1 -v admin_pw="$ADMIN_PW" -v owner_pw="$OWNER_PW" <<'SQL'
+          CREATE ROLE bb_admin LOGIN CREATEROLE PASSWORD :'admin_pw';
+          CREATE ROLE brain_migrator LOGIN PASSWORD :'owner_pw';
+          CREATE DATABASE brain_it OWNER brain_migrator;
+          SQL
+          unset PGPASSWORD SU_PW
+          {
+            echo "PGDATA=$PGDATA"
+            echo "BB_ADMIN_DSN=host=127.0.0.1 port=5432 user=bb_admin password=$ADMIN_PW"
+            echo "BB_OWNER_DSN=host=127.0.0.1 port=5432 user=brain_migrator password=$OWNER_PW"
+            echo "BB_TEST_DB=brain_it"
+            echo "BB_TEST_ROLE_PASSWORD=$ROLE_PW"
+            echo "BRAIN_DB_MIGRATION_URL=postgresql+psycopg://brain_migrator:$OWNER_PW@127.0.0.1:5432/brain_it"
+          } >> "$GITHUB_ENV"
+
+      - name: Runtime roles as bb_admin, then alembic upgrade head and alembic check as brain_migrator
+        run: |
+          set -euo pipefail
+          psql "$BB_ADMIN_DSN dbname=brain_it" -v ON_ERROR_STOP=1 -q -f ddl/bootstrap_roles.sql
+          test "$(psql "$BB_OWNER_DSN dbname=brain_it" -tAc "SELECT rolsuper OR rolbypassrls OR rolcreaterole OR rolcreatedb FROM pg_roles WHERE rolname = current_user")" = f
+          PYTHONPATH=python BRAIN_DDL_DIR=ddl python -m alembic upgrade head
+          PYTHONPATH=python BRAIN_DDL_DIR=ddl python -m alembic check
+
+      - name: bb_admin cannot escalate (PostgreSQL 16 CREATEROLE limits, D-6c)
+        run: |
+          set -euo pipefail
+          refused() {
+            if psql "$BB_ADMIN_DSN dbname=brain_it" -v ON_ERROR_STOP=1 -qtAc "$1" >/dev/null 2>"$RUNNER_TEMP/err"; then
+              echo "::error::not refused: $1"; exit 1
+            fi
+            grep -q "permission denied" "$RUNNER_TEMP/err" || { cat "$RUNNER_TEMP/err"; exit 1; }
+            echo "refused: $1"
+          }
+          refused "CREATE ROLE ci_probe SUPERUSER"
+          refused "CREATE ROLE ci_probe BYPASSRLS"
+          refused "CREATE ROLE ci_probe REPLICATION"
+          refused "CREATE ROLE ci_probe CREATEDB"
+          refused "ALTER ROLE brain_migrator PASSWORD NULL"
+          refused "DROP ROLE brain_migrator"
+          refused "ALTER ROLE postgres NOLOGIN"
+          refused "GRANT pg_read_all_data TO bb_admin"
+          refused "GRANT pg_execute_server_program TO bb_admin"
+          refused "GRANT brain_migrator TO bb_admin"
+          refused "CREATE DATABASE ci_probe"
+          refused "SET ROLE brain_app"
+          refused "SELECT count(*) FROM intel.forecast"
+
+      - name: Generated files match the generator (no drift)
+        run: |
+          set -euo pipefail
+          python tools/schema_gen/build_all.py
+          git diff --exit-code -- .
+          test -z "$(git status --porcelain -- .)"
+
+      - name: Integration and isolation tests (41, none skipped)
+        run: |
+          set -euo pipefail
+          python -m pytest -q -p no:cacheprovider 2>&1 | tee "$RUNNER_TEMP/pytest.log"
+          tail -1 "$RUNNER_TEMP/pytest.log" | grep -Eq '^41 passed( in |, [0-9]+ warnings? in )'
+
+      - name: Stop PostgreSQL
+        if: always()
+        run: test -z "${PGDATA:-}" || sudo -u postgres /usr/lib/postgresql/16/bin/pg_ctl -D "$PGDATA" -m immediate stop || true
 
   # 4. Contract Tests (Crucial for preventing contract drift)
   contract-tests:

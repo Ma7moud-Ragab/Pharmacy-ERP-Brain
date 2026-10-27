@@ -1,0 +1,1557 @@
+# ERP Brain - `brain_db` Design Specification
+
+## Part 1 of 4 - Architecture, Source Traceability, Scope, Conventions, ERDs
+
+| | |
+|---|---|
+| **Database** | `brain_db` (PostgreSQL), owned exclusively by the Python/FastAPI AI Brain |
+| **Source of truth** | `دليل الـTeam Lead لمشروع ERP Brain.md` (2,149 lines). References: **G§x** = section of that guide; **BP§x** = Blueprint section the guide cites |
+| **Status** | MVP design baseline finalized 17 Oct 2026. See `MVP_DECISIONS_AND_CONTRACTS.md` for closed decisions and contracts. |
+| **Date** | 14 Oct 2026 |
+
+### Package map
+
+| File | Deliverables covered |
+|---|---|
+| `docs/01_architecture_traceability_conventions.md` (this file) | 1 Executive summary, 2 Traceability, 3 Scope, 4 Entity inventory, 5 Conventions, 6 ERDs, 8 Relationships |
+| `docs/02_table_specifications.md` | 7 Complete table specifications (all 27 tables, every column) |
+| `docs/03_lifecycle_security_performance_testing.md` | 12 Data lifecycle, 13 Security/tenancy/audit, 14 Performance/retention, 15 Testing + Definition of Done |
+| `docs/04_migration_backlog_decisions_handoff.md` | 11 Alembic plan, 16 Backlog, 17 Open decisions, 18 Developer handoff |
+| `ddl/*.sql` | 9 PostgreSQL DDL (per-migration files + `brain_db_mvp.sql`) |
+| `python/brain/db/models.py`, `contracts_jsonb.py`, `migrations_util.py` | 10 SQLModel models, Pydantic JSONB/feature contracts |
+| `alembic/` , `alembic.ini` | 11 Alembic environment and six revisions |
+| `erd/*.mmd` | 6 Mermaid sources for every diagram in this document |
+
+### What was and was not verified
+
+Nothing was executed against a database, and no migration was run. The authoring sandbox had no PostgreSQL, SQLAlchemy, SQLModel, Alembic or Pydantic, so:
+
+- **Checked programmatically:** the schema definition from which DDL, models, column tables and ERDs are all generated (every FK references a PK/unique key with identical column types; all object names are unique and at most 63 characters; the SQL contains no `%`, which some drivers rewrite). All five Mermaid diagrams were rendered successfully with mermaid-cli. All Python files parse.
+- **Because everything is generated from one definition**, table names, column names, types, constraint names and index names are identical across the ERDs, DDL, column tables and Python models.
+- **Not checked, and the team must test:** DDL execution, trigger behaviour, `alembic check` drift, SQLModel mapper configuration, Pydantic models, and the SQL in Part 3. Part 3 section 4 lists the tests.
+
+---
+
+## 1. Executive Summary
+
+`brain_db` stores **derived intelligence, normalized inputs, ML artifacts' metadata, agent state and audit/observability records**. It is not a second ERP. It never holds a copy of ERP inventory as a source of truth, and it is never read by the ERP.
+
+**Shape:** 25 mandatory tables, 1 optional (SHOULD) table and 1 future-only table, with 432 columns, 27 foreign keys, 201 CHECK constraints, 35 unique constraints/indexes, 43 secondary indexes, 41 triggers and 3 projection views. They are grouped into five PostgreSQL schemas by durability tier, because the guide itself separates "derived, rebuilt by backfill" from "AI records, important for audit, so backed up" (G§14.2):
+
+| Schema | Tier | Contents | Recovery |
+|---|---|---|---|
+| `ingest` | R (rebuildable) + O (operational) | `canonical_cache`, `sales_fact`, poll checkpoints, failures, day coverage | Canonical backfill; operational rows are small |
+| `feat` | R | `calendar_day`, `feature_daily` | Nightly full recompute |
+| `intel` | H (history-bearing derived) | rule config, training runs, model registry, evaluations, forecasts, anomalies, risk, recommendations | Back up: past forecasts cannot be rebuilt exactly |
+| `agent` | A (audit-critical) | sessions, messages, tool-call log, proposals, approvals, executions | Back up with the longest retention |
+| `audit` | A | `audit_log`, `llm_usage` | Back up with the longest retention |
+
+**Key decisions (each is justified later; RC = needs approval):**
+
+1. **Reliable ingestion by polling (D-23, D-25).** The Brain polls Canonical `GET /sales` every `sales_poll_interval_seconds` with `updated_since = high_watermark - poll_overlap_seconds`. Each row is an absolute daily total upserted by `(tenant, product, date)` keeping the newest ERP `updated_at`, so duplicates, overlaps and out-of-order pages are harmless. The watermark in `sync_checkpoint` advances only after the last page. There is no message broker and no event ledger in the MVP.
+2. **`sales_fact` write semantics (RC-05, revised by D-25).** Every write is an absolute overwrite from Canonical; nothing is ever incremented. The nightly reconcile re-reads the last `reconcile_lookback_days` by date range (no watermark), which heals any row the watermark missed because of a late ERP commit.
+3. **Missing is not zero (RC-04).** `sales_day_coverage` records which days are verified complete, so `feature_daily` can mark a day `zero_filled` (true zero) or `missing`. This implements "never treat missing days as zero silently" (G§7.3).
+4. **One feature table is sufficient for the MVP.** `feat.feature_daily` is a typed, wide, per-day table keyed `(tenant_id, product_id, feature_date)` with an explicit label/input split and a `feature_set_version`, so training and inference read the same rows through the same function and leakage is structurally prevented. No registry or platform.
+5. **Forecasts are never overwritten (RC-06).** `forecast` (one generation) + `forecast_point` (daily values). The guide's candidate key `(tenant_id, product_id, model_version)` is not sufficient on its own, because the same model version forecasts every night.
+6. **Models, runs and outputs are distinct.** `training_run` (a job) produces `model_registry` rows (artifact identity and lifecycle); `forecast` rows reference a model; `model_evaluation` is append-only history.
+7. **Insight and Alert are projections, not tables (RC-03).** Three read-only views serve the documented UI/API objects without storing anything twice.
+8. **The human-approval gate is enforced in the database (RC-07).** An approval can only reference the exact `arguments_sha256` of its proposal (composite FK); proposal arguments are immutable (trigger); status transitions are legal-path-only (trigger); a proposal can have at most one in-flight execution and at most one success (partial unique indexes); every write attempt reuses the proposal's idempotency key.
+9. **Audit is append-only** (trigger + no UPDATE/DELETE privilege) and separate from rebuildable data. `llm_usage` stores no prompt or completion text.
+10. **Tenant context is on every table** and every intra-brain FK includes `tenant_id`, so a cross-tenant reference is impossible at the database level. `ingest.tenant_registry` lists the tenants the Brain serves and references each tenant's Canonical credential, never the secret (N-01). PostgreSQL Row-Level Security is a second wall on every tenant table, behind mandatory application scoping (N-02, migration 0007).
+
+**Decision status:** RC-01 to RC-12 and OD-01 to OD-24 have an MVP baseline in `MVP_DECISIONS_AND_CONTRACTS.md`. The defaults below are adopted for implementation; a change requires a reviewed contract/schema update and a migration when persistence is affected. Acceptance checks remain implementation work and are not implied to have passed.
+
+---
+
+## 2. Source Analysis
+
+### 2.1 Persistent entities and who produces / consumes them
+
+| Entity / data object | Produced by | Consumed by | Source | Realised as |
+|---|---|---|---|---|
+| CanonicalCache | Ingestion (Canonical client) | Risk, Recommendation, tools | G§3.9, §14.2 | `ingest.canonical_cache` |
+| SalesFact (product x day) | Normalization | Features, anomaly, BI | G§3.10, §14.2 | `ingest.sales_fact` |
+| ~~Event de-duplication state~~ | removed (D-23) | | No events in the MVP; idempotency comes from the absolute upsert | none (`processed_event` removed) |
+| Backfill / feature checkpoints | Backfill and feature jobs | Same jobs | G§3.9, §3.11; **storage not specified** | `ingest.sync_checkpoint` (DD) |
+| Ingestion failures | Consumer / client | Ops | G§3.9 (schema validation); **not specified** | `ingest.ingest_failure` (DD) |
+| Feature tables (`computed_at`) | Feature pipeline | Forecast, anomaly (risk rarely) | G§3.11, §14.2, §15.1 | `feat.feature_daily`, `feat.calendar_day` |
+| Forecast | Forecasting | Risk, BI, `get_forecast`, ForecastChart | G§3.12, §14.2 | `intel.forecast`, `intel.forecast_point` |
+| ModelRegistry | Forecasting training | Inference, evaluation | G§3.28 | `intel.model_registry`, `intel.training_run`, `intel.model_evaluation` |
+| AnomalyEvent | Anomaly engine | Risk, AlertBadge, `get_anomalies` | G§3.13, §8.3 | `intel.anomaly_event` |
+| RiskAssessment | Risk engine | Recommendation, Insight, Agent | G§3.14, §9 | `intel.risk_assessment` |
+| Recommendation | Recommendation engine | Insight, Agent | G§3.15, §9 | `intel.recommendation` |
+| Insight / Alert | (projection) | UI, Agent, LLM input | G§6.6 ("queries on existing tables"), §15.1 | views `intel.v_insight_current`, `intel.v_alert_open` |
+| Business rules / thresholds | AI Lead | All engines | G§3.14 ("small tested rules"), §8.3, §9.2 (thresholds tuned by Ibrahim) | `intel.rule_config` (RC-08) |
+| AgentSession + last N messages | Orchestrator | Orchestrator | G§3.24 | `agent.agent_session`, `agent.agent_message` |
+| AgentAction | Orchestrator / Approval | UI, audit | G§3.23, §14.2 | `agent.agent_action` + proposal/approval/execution + view `agent.v_agent_action` |
+| ActionProposal / ActionResult | Orchestrator / Approval | ApprovalModal, audit | G§12.3, §15.1 | `agent.action_proposal`, `agent.action_execution` |
+| Approval / rejection | Approval Engine | Audit | G§3.23, §12.3 | `agent.action_approval` |
+| AuditLog (Brain) | Audit writer | Reviewers | G§3.26, §14.1 | `audit.audit_log` |
+| LLM usage records | LLM layer | Cost dashboard | G§3.29, §14.2, §13.4 | `audit.llm_usage` |
+| Morning briefing (cached) | Briefing job | Document view | G§6.8 (SHOULD) | `intel.briefing` (optional) |
+| Embedding | RAG (future) | LLM layer | G§3.19, §6.15 | `rag.embedding` (future only) |
+
+### 2.2 Explicit identifiers, interfaces and names in the source
+
+| Item | Source |
+|---|---|
+| ~~Redis stream `erp.events`; event envelope~~ **not used in the MVP (D-23)**; the Brain polls Canonical daily totals instead | G§3.5, §14.1 |
+| `FeatureStore.get_features(product_id, date)`; feature key `(tenant_id, product_id, date)`; `computed_at` | G§3.11, §14.2 |
+| `ForecastEngine.predict(product_id)`, `AnomalyEngine.score(event)` | G§3.12, §15.1 |
+| `Forecast(product_id, model_version, horizon_days, predicted_demand, confidence_low, confidence_high, generated_at)` and key `tenant_id, product_id, model_version` | G§3.12, §14.2 |
+| `ModelRegistry(version, trained_at, metrics, artifact_path, status)`; inference reads the **latest validated** | G§3.28, §7.4 |
+| Anomaly output `entity{type,id}, expected_daily, actual_today, score(0..1), severity, reasons[], detected_at` | G§8.3 |
+| `RiskAssessment(entity, type, severity, confidence, detected_at)`; `Recommendation(risk_id, type, payload)` | G§3.14, §3.15 |
+| `AgentAction(tool_name, arguments, status, requires_approval, approved_by, result)` | G§14.2 |
+| `ActionProposal{id, tool_name, arguments, requires_approval, status, reason, insight_id, session_id}`; `POST /agent/proposals/{id}/approve`; scope `agent:approve` | G§12.3 |
+| `ActionResult(status: success\|failed, reason)` | G§3.23 |
+| Canonical reads `get_products/get_inventory/get_sales(range)/get_suppliers` (paginated, `updated_since`); writes `create_purchase_order`, `update_inventory`; `capabilities()` | G§4.7 |
+| `Idempotency-Key` on every write; adapter stores a dedupe record | G§3.4, §4.7 |
+| JWT claims `sub, roles, tenant_id, scopes, iat, exp`; W3C `traceparent` | G§15.1 |
+| `/brain/admin/cost`; LLM records `tokens_in/out, cost, model, latency` | G§3.29, §14.2 |
+| Artifact file such as `lgbm_amox_v3.pkl` on a Docker volume | G§3.28, §14.1 |
+
+### 2.3 Events and workflows that affect persistence
+
+1. **Sales polling** (replaces event ingestion, D-23): every `sales_poll_interval_seconds`, paged `get_sales(from, to, updated_since)` -> schema validation -> absolute upsert -> advance the watermark after the last page.
+2. **Scheduled backfill** by `updated_since` (G§3.9).
+3. **Normalization** writes/updates `SalesFact` per product x day (G§3.10).
+4. **Features**: incremental recompute for rows changed by the poll plus full nightly recompute (G§3.11).
+5. **Forecasting**: full retrain once a night in the end-of-day run after the closed day is reconciled (D-26, decided 21 Oct: no weekly retrain), on-demand single-SKU inference; winner registered as `validated` (G§7.4, §7.5).
+6. **Anomaly -> Risk -> Recommendation** pipeline (G§5.1, §9).
+7. **Agent**: tool calls -> `ActionProposal` -> human approval -> execution -> `ActionResult`; `AgentAction` and `AuditLog` written on both approve and reject (G§12.3).
+8. **Weekly post-deployment evaluation** of predicted vs actual (WAPE) (G§7.8).
+9. **Morning briefing** cached (G§6.8, SHOULD).
+
+### 2.4 Operational and security constraints affecting the schema
+
+- Brain never connects to `erp_db`; separation enforced by network, not convention (G§3.30, §14.1).
+- Every table carries `tenant_id` with a seeded default; every query is tenant-scoped; keys include tenant (G§18.4).
+- No PII beyond need; no prompts containing customer data; no PII in traces (G§14.1, §3.29, §3.24).
+- Audit rows are never updated or deleted (G§3.26).
+- Every write needs human approval; no auto-retry of failed writes; every write has an Idempotency-Key (G§3.23, §4.7, §12).
+- LLM has no database access; tools only (G§11.4).
+- Migrations: Alembic, additive-first, run as a deploy step before restart (G§14.2).
+- Model artifacts on a volume plus a registry row; no MLflow/S3 (G§3.28).
+
+### 2.5 Explicitly deferred / out of MVP
+
+RAG and the `Embedding` table (G§3.19, §6.15); promotion data (`is_promotion` when the ERP records it; G§3.11, §7.8); multi-tenant administration and RLS (G§18.4, §19); dynamic policy engine (G§12.2); cross-session memory (G§3.24); MLflow/S3 (G§3.28); Feast / feature-store platform (G§3.11).
+
+### 2.6 Unresolved in the source (design decisions made here, or open)
+
+The source left open where idempotency state and checkpoints live, the business-day boundary, product/supplier identifiers, open-PO reads, `insight_id`, Insight/Alert storage, approval TTL, retention, and model artifact format. These are closed for MVP in `MVP_DECISIONS_AND_CONTRACTS.md`; the Part 4 register retains the original questions and rationale for traceability.
+
+---
+
+## 3. Source Traceability Matrix
+
+Status key: **S** source-defined; **S+** source-defined, detail added by this design; **DD** design decision where the source is silent; **RC** recommendation requiring approval; **F** deferred/future; **OD** open decision.
+
+| ID | Requirement | Source | Proposed table / component | Design decision | Status |
+|---|---|---|---|---|---|
+| T01 | Two independent databases; Brain never touches `erp_db` | G§1.5, §3.6, §3.30, §14.1 | Deployment; roles and grants | `brain_app` has no ERP credentials; no FDW/db-links; CI check for ERP connection strings; all ERP data via Canonical client | S |
+| T02 | `brain_db` = derived data; not a second ERP | G§3.30, §14.2 | All schemas | Risk stores `input_*` snapshots as provenance only; cache entries are advisory | S |
+| T03 | Derived data rebuilt by backfill; AI records backed up | G§14.2 | Tiers R/O/H/A, schemas | Backup policy per schema; rebuild procedure per table | S+ |
+| T04 | PostgreSQL + SQLModel + Alembic; pgvector only if RAG | G§3.30, §14.2 | `models.py`, `ddl/`, `alembic/`, `rag.*` | No extension in MVP migrations | S |
+| T05 | No feature-store platform | G§3.11, §14.2 | `feat.feature_daily` | Plain table; no registry | S |
+| T06 | Every table: `id`, `tenant_id`, `created_at/updated_at/created_by/updated_by` | G§14.2 | Conventions | Adapted per table (immutable / natural-key tables differ) | RC-02 |
+| T07 | `tenant_id` everywhere with seeded default; tenant-scoped queries; tenant-keyed artifacts | G§18.4 | All tables | Composite `(tenant_id, id)` FKs; default kept for MVP | S, RC-11 |
+| T08 | Alembic, additive-first, pre-restart deploy step | G§14.2 | `alembic/` | SQL-file revisions; `alembic check` in CI | S, RC-09 |
+| T09 | Event envelope fields | G§3.5 | none | **Superseded (D-23):** no events in the MVP | F |
+| T10 | Validate schema; ignore duplicates; acknowledge only after success | G§3.9 | `sales_fact` upsert, `sync_checkpoint`, `ingest_failure` | Polled rows validated against the Canonical schema; idempotent by absolute upsert; watermark advanced only after the last page | DD (D-25) |
+| T11 | Redis Streams is transport, not truth | G§3.7, §14.1 | none | **Superseded (D-23):** no Redis Streams in the MVP | F |
+| T12 | Scheduled backfill by `updated_since` | G§3.9, §4.7 | `ingest.sync_checkpoint` | Watermark with overlap window | DD |
+| T13 | CanonicalCache with `synced_at`, not a source of truth | G§14.2 | `ingest.canonical_cache` | `source_updated_at` guards against stale overwrite | S |
+| T14 | SalesFact per product x day | G§3.10, §14.2 | `ingest.sales_fact` | Unique `(tenant, product, date)`; aggregate columns for rules | S |
+| T15 | SalesFact increments on events | G§3.10 example | `sales_fact.source_mode` | **Superseded (D-25):** no increments; every write is an absolute daily total | RC-05 |
+| T16 | Dates normalised to UTC | G§3.10 | `sales_fact.sales_date` | Business date in tenant timezone; UTC for timestamps | OD-03 |
+| T17 | Missing days never silently zero; outliers marked not deleted | G§7.3 | `sales_day_coverage`; `feature_daily.y_status`, `is_outlier` | `zero_filled` vs `missing` | S+, RC-04 |
+| T18 | Features: lags, rolling, dow, month, holidays, seasons, `is_promotion` when available | G§3.11, §7.2 | `feat.feature_daily`, `feat.calendar_day` | Explicit typed columns; `is_promotion` always NULL in MVP | S |
+| T19 | `FeatureStore.get_features(product_id, date)`; key `(tenant, product, date)`; `computed_at` | G§3.11, §14.2 | `feature_daily` PK | Natural composite PK | S |
+| T20 | Incremental recompute on events + nightly full; never full table per event | G§3.11 | `compute_mode`, `inputs_max_updated_at`, `sync_checkpoint` | Change detection via `sales_fact.updated_at` watermark | S+ |
+| T21 | Feature-table contract owned jointly (Ibrahim) | G§15.1, §3.11 | `contracts_jsonb.py` `FeatureVector` | Needs PR to `/contracts` with both owners | S, process |
+| T22 | `Forecast` fields and key `(tenant, product, model_version)` | G§3.12, §14.2 | `intel.forecast` + `forecast_point` | Extra keys: generation, origin, target date | S+, RC-06 |
+| T23 | `confidence_low/confidence_high` must be stable | G§7.6 | `forecast_point.confidence_low/high` | Interval method and nominal coverage stored on the header | S |
+| T24 | `ModelRegistry`; inference reads latest *validated* | G§3.28, §7.4 | `intel.model_registry` | Candidates registered with status; rollback via `degraded` | S |
+| T25 | Artifacts as files on a volume | G§3.28, §14.1 | `artifact_path/sha256/format` | Relative path; checksum verified on load; avoid pickle | S, RC-12 |
+| T26 | Baselines, Holt-Winters, LightGBM, cold start `low` confidence | G§7.3, §7.4 | `model_family`, `forecast.cold_start`, `forecast_confidence` | Shared methods registered with `product_id NULL` | S |
+| T27 | Min 8-12 weeks history for per-SKU training | G§7.2 | `rule_config(forecast)`, `feature_daily.history_days` | Parameterised | S |
+| T28 | Weekly predicted vs actual (WAPE); degraded models flagged | G§7.8, §3.27 | `intel.model_evaluation`, `status='degraded'` | Append-only evaluation history | S, table DD |
+| T29 | Time-based split; backtest | G§7.4 | `train_data_start/end`; `feature_daily` contract | Leakage rules in Part 2/3 | S |
+| T30 | AnomalyEvent fields; score 0..1; reasons | G§8.3 | `intel.anomaly_event` | Natural-key upsert; reviewable lifecycle | S+ |
+| T31 | Anomaly layers: rules, z-score, optional Isolation Forest | G§8.2 | `detection_method`, `model_registry(purpose='anomaly')` | | S |
+| T32 | RiskAssessment from forecast + inventory + lead time + anomaly + rules | G§3.14, §9 | `intel.risk_assessment` | Versioned rows; typed input snapshot columns | S+ |
+| T33 | Risk rules deterministic: cover vs lead time (+ margin 2 days), upgrade on high anomaly | G§9.2 | `rule_config(risk)` | Thresholds are data, versioned | S, RC-08 |
+| T34 | `Recommendation(risk_id, type, payload)`; qty = demand_over_lead + safety - available | G§3.15, §9.2 | `intel.recommendation` | `calculation` JSONB keeps formula inputs | S |
+| T35 | A recommendation is not a PO | G§3.15 | Separate from `agent.*` | Derived `actioned` status via join | S |
+| T36 | Insight / Alert saved in `brain_db` vs "business state = queries on existing tables" | G§5.1, §6.6 | Views | Projections, no tables | RC-03 |
+| T37 | Open-PO suppression needs a PO read capability | G§18.5 | `canonical_cache('purchase_order')`; `calculation.open_po_check` | Recorded as `skipped_no_capability` until decided | OD-05 |
+| T38 | Supplier `lead_time_days` | G§11.3 | `canonical_cache('supplier')` | Product-to-supplier mapping unspecified | OD-04 |
+| T39 | AgentSession + last N messages; no cross-session memory; no PII | G§3.24 | `agent.agent_session`, `agent_message` | Scrubbed, size-capped, expiring messages | S |
+| T40 | AgentAction fields | G§14.2, §3.23 | `agent_action` + proposal/approval/execution + view | Split by responsibility; view restores source shape | S+, RC-07 |
+| T41 | ActionProposal shape | G§12.3 | `agent.action_proposal` | Shape "proposed for discussion" in source; final in `/contracts/ai-output` | S |
+| T42 | Approval only with scope `agent:approve`; proposal survives refresh | G§12.3 | `action_approval.decider_scopes`; proposal in its own table | | S |
+| T43 | Never execute before approval; no automatic write retry | G§3.23, §12 | Triggers + unique indexes | Re-approval path only after an *unknown-outcome* failure, with a new human decision round once the proposal has failed (D-43) | S, RC-07 |
+| T44 | `Idempotency-Key` on every write | G§4.7 | `action_proposal.idempotency_key` | One key per proposal, reused across attempts | S |
+| T45 | `ActionResult(status, reason)` | G§3.23 | `agent.action_execution` | Adds certainty and ERP reference | S+ |
+| T46 | Brain `AuditLog` append-only; who/what/which args/which model/trace | G§3.26, §14.1 | `audit.audit_log` | Trigger + privileges | S |
+| T47 | LLM usage `tokens_in/out, cost, model, latency` | G§14.2, §3.29 | `audit.llm_usage` | No prompt text | S |
+| T48 | W3C trace id on every hop; no customer data in traces | G§3.29, §15.1 | `trace_id CHAR(32)` | Format CHECK | S |
+| T49 | LLM never touches the DB; tools only | G§11.4 | No LLM role; services only | Human read-only role separate | S |
+| T50 | Morning briefing cached | G§6.8 | `intel.briefing` | SHOULD, optional migration | S (SHOULD) |
+| T51 | RAG optional; vector never holds sales/inventory | G§3.19, §14.1 | `rag.embedding` | Separate file; extension only there | F |
+| T52 | Multi-tenancy is core (D-34); RLS as a second wall (N-02) | G§18.4, §19 | `tenant_id` everywhere; `ingest.tenant_registry` (N-01) | `FORCE ROW LEVEL SECURITY` + `pol_tenant_isolation` on every tenant table (0007) | MVP |
+| T53 | No `is_promotion` data: promo spikes appear as anomalies | G§7.8 | `feature_daily.is_promotion` NULL | Documented limitation | S |
+| T54 | Brain separable, ERP-independent | G§19.2 | No ERP-specific columns | | S |
+
+---
+
+## 4. Scope Matrix
+
+| Component | MVP-mandatory | MVP-optional (SHOULD) | Future only |
+|---|---|---|---|
+| Ingestion state: `sync_checkpoint`, `ingest_failure` (`processed_event` removed, D-23) | **Yes** | | |
+| Normalised data: `canonical_cache`, `sales_fact`, `sales_day_coverage` | **Yes** | | |
+| Features: `calendar_day`, `feature_daily` | **Yes** | | |
+| `rule_config`, `training_run`, `model_registry`, `model_evaluation`, `forecast`, `forecast_point` | **Yes** | | |
+| `anomaly_event`, `risk_assessment`, `recommendation` | **Yes** | | |
+| Views `v_insight_current`, `v_alert_open`, `v_agent_action` | **Yes** | | |
+| `agent_session`, `agent_message`, `agent_action`, `action_proposal`, `action_approval`, `action_execution` | **Yes** | | |
+| `audit_log`, `llm_usage` | **Yes** | | |
+| `briefing` | | **Yes** | |
+| Anomaly review fields (`status`, `reviewed_*`) | columns present | UI/endpoint is SHOULD (OD-15) | |
+| Isolation Forest (`model_family='isolation_forest'`) | | optional third layer | |
+| `rag.embedding`, `pgvector` | | | **Yes** |
+| Row-Level Security | **Yes** (N-02, migration 0007) | | |
+| Partitioning (`audit_log`, `forecast_point`, `llm_usage`, `feature_daily`) | | | **Yes** (triggers defined in Part 3) |
+| Feature-store platform, MLflow, additional databases | Not planned | | |
+
+---
+
+## 5. Key Decisions and Recommendations Requiring Approval
+
+| ID | Recommendation | Why | Alternative |
+|---|---|---|---|
+| RC-01 | Five schemas by durability tier | Backup/restore per tier (`pg_dump -n`), clear ownership; matches the guide's rebuildable vs audit split | Single schema with naming prefixes |
+| RC-02 | Natural composite PKs for `sync_checkpoint`, `sales_day_coverage`, `calendar_day`, `feature_daily`, `forecast_point`; `created_by/updated_by` only where an actor exists; no `updated_at` on immutable tables | The guide says every table has `id` and audit columns, but a surrogate key on a ledger or a time-series row adds an index and no meaning | Add `id` and audit columns everywhere |
+| RC-03 | `Insight` and `Alert` are views, not tables | G§6.6 says business state is "queries on existing tables"; storing them duplicates risk/recommendation and creates drift | Materialised tables |
+| RC-04 | `sales_day_coverage` table | Only way to distinguish a true zero from a missing day without guessing | Infer from event gaps (fragile) |
+| RC-05 | Every `sales_fact` write is an absolute daily total from Canonical (revised by D-25: no stream increments) | Idempotent under duplicates, overlaps, out-of-order pages and corrections | Stream increments on the open day (removed together with Redis Streams) |
+| RC-06 | `forecast` header + `forecast_point` children, unique by `job_run_id`, never overwritten | Evaluation by lead time and audit | One row per product and model version, overwritten |
+| RC-07 | Split agent write path into proposal / approval / execution with hash-bound FKs, plus `agent_action` as the tool-call log and a `v_agent_action` view | Makes "approval cannot authorise a different payload" a database guarantee. Added states `expired`, `cancelled`, `executing` | Single `agent_action` table with status column (as in G§14.2) |
+| RC-08 | `rule_config` versioned parameter table | Provenance of thresholds without copying values into every row | Constants in code with a version string |
+| RC-09 | Alembic revisions execute reviewed SQL files; models are checked with `alembic check` | Triggers, partial indexes, composite FKs and grants are DDL-first; reviewable as plain SQL | `op.create_table` for everything (long, duplicates models) |
+| RC-10 | `TEXT` + `CHECK` instead of PostgreSQL ENUM types | Enum values can be added/changed without `ALTER TYPE` constraints; matches Pydantic `Literal` | Native enums |
+| RC-11 | Composite `(tenant_id, id)` foreign keys | A cross-tenant reference becomes impossible, not merely unlikely (RLS, N-02, covers reads and writes, not references) | Single-column FKs plus RLS only |
+| RC-12 | Do not use pickle for model artifacts; use LightGBM text format or `joblib` with checksum | Deserialising pickle executes code; the guide's `.pkl` example is a risk if the volume is writable by another process | Keep `.pkl` with strict volume permissions |
+
+### Source ambiguities resolved here
+
+| Ambiguity | Resolution |
+|---|---|
+| `Forecast.predicted_demand` is a single number in G§3.12 but a chart needs a series | Daily points; a horizon total is `SUM(predicted_demand)` over the first N points |
+| The range "100..145" over a 5-day lead time is a horizon-level interval | Risk uses the sum of daily `confidence_high` (conservative, may exceed a true aggregate bound); the method is recorded in `calculation` |
+| `AgentAction` is written on both approve and reject (G§12.3) | The decision is `action_approval`; execution is `action_execution`; `agent_action` is the tool-call log; `v_agent_action` restores the source shape |
+| `insight_id` in `ActionProposal` has no stored Insight | `insight_id` = `risk_assessment.id` (OD-06) |
+
+### Field map: source objects to `brain_db`
+
+| Source object and field | `brain_db` |
+|---|---|
+| `SalesFact(product_id, date, quantity)` | `ingest.sales_fact(product_id, sales_date, units_sold)` |
+| `Forecast.predicted_demand`, `confidence_low/high` | `intel.forecast_point.predicted_demand`, `confidence_low`, `confidence_high` per `target_date` |
+| `Forecast.model_version`, `horizon_days`, `generated_at`, `factors[]` | `forecast.model_id -> model_registry.model_version`, `forecast.horizon_days`, `generated_at`, `factors` |
+| `AnomalyEvent.entity{type,id}` | `anomaly_event.product_id` (type is always `product` in the MVP) |
+| `expected_daily` / `actual_today` / `detected_at` | `expected_value` / `observed_value` / `first_detected_at` |
+| `reasons[]` (strings) | `reasons[].code` (objects add `value`, `threshold`; the API projects codes) |
+| `RiskAssessment(entity,type,severity,confidence,detected_at)` | `product_id, risk_type, severity, confidence, calculated_at` |
+| `Recommendation(risk_id,type,payload)` | `risk_assessment_id, recommendation_type, payload` |
+| `ModelRegistry(version,trained_at,metrics,artifact_path,status)` | `model_version, trained_at, backtest_wape + metrics, artifact_path, status` |
+| `AgentAction(tool_name,arguments,status,requires_approval,approved_by,result)` | view `agent.v_agent_action` |
+| `ActionProposal(... insight_id, session_id)` | `action_proposal(... risk_assessment_id, session_id)` |
+| `ActionResult(status,reason)` | `action_execution(status, error_code, error_message, result)` |
+| `AuditLog(actor, action, approved_by, trace_id)` | `audit_log(actor_type+actor_id, event_type+tool_name, approved_by_actor_id, trace_id)` |
+| LLM records | `llm_usage(tokens_in, tokens_out, estimated_cost_usd, model, latency_ms)` |
+
+---
+
+## 6. Entity Inventory
+
+Tier: R rebuildable, O operational state, H history-bearing derived, A audit-critical.
+
+| Schema.table | Scope | Tier | Purpose | Written by |
+|---|---|---|---|---|
+| `ingest.sync_checkpoint` | MVP | O | Watermark per (tenant, resource) for the short-interval sales poll (`updated_since`), the nightly reconcile and the intraday intelligence window. | Sales poller, nightly reconcile and intelligence window (single writer per resource, guarded by `pg_try_advisory_xact_lock(hashtext(tenant\|\|resource))`) |
+| `ingest.ingest_failure` | MVP | O | Record of a Canonical poll or read the Brain could not process after bounded retries. | Sales poller / canonical client (Ibrahim, D-02) |
+| `ingest.canonical_cache` | MVP | R | Local durable cache of validated Canonical JSON (Product, InventoryItem, Supplier, optionally PurchaseOrder) with `synced_at`. | Canonical client (Ibrahim, D-02) |
+| `ingest.sales_fact` | MVP | R | Daily sales per product (product x business day), copied from the polled Canonical `DailySalesTotal`. | Sales poller (every `sales_poll_interval_seconds`), nightly reconcile, manual backfill |
+| `ingest.sales_day_coverage` | MVP | O | Per tenant-day statement of whether Brain sales data for that day is authoritative. | Sales poller (inserts `open`), nightly reconcile and backfill (set `complete` or `gap`) |
+| `feat.calendar_day` | MVP | R | Known-in-advance calendar attributes (holiday, Ramadan, flu season) per tenant calendar. | Calendar seed script (Ibrahim, D-02); manual overrides by admin script |
+| `feat.feature_daily` | MVP | R | One wide, typed feature row per (tenant, product, day). | Feature pipeline (incremental for products whose sales_fact rows changed since the last poll; nightly full) |
+| `intel.rule_config` | MVP | H | Immutable, versioned parameter sets for the deterministic engines (anomaly thresholds, risk margins, safety stock, forecast selection rules, platform settings such as business timezone and cache freshness). | Migrations (seed) and an admin script reviewed by the AI Lead (Ibrahim) |
+| `intel.training_run` | MVP | H | One execution of a training job (nightly end-of-day retrain, D-26; or on-demand). | Forecasting training job (Ibrahim) |
+| `intel.model_registry` | MVP | H | Registry of trained or fitted models/methods. | Forecasting/anomaly training (Ibrahim) |
+| `intel.model_evaluation` | MVP | H | Append-only evaluation results over time (backtests, weekly post-deployment predicted-vs-actual, golden-set precision/recall). | Evaluation harness / weekly evaluation job (Ibrahim, tooling help from Mahmoud) |
+| `intel.forecast` | MVP | H | Header of ONE forecast generation for one product by one model at one origin date. | Forecast inference (Ibrahim) |
+| `intel.forecast_point` | MVP | H | Daily predicted demand with confidence bounds for one forecast generation. | Forecast inference (Ibrahim) |
+| `intel.anomaly_event` | MVP | H | A detected unusual observation (an unexplained deviation, NOT a confirmed incident) for a product-day, with expected vs observed, score, severity, structured reasons and provenance. | Anomaly engine (Ibrahim); review fields by the Brain API on behalf of a user (SHOULD, OD-15) |
+| `intel.risk_assessment` | MVP | H | Deterministic risk result per product and risk type (stockout_risk, unusual_demand) with the exact inputs and rule version used. | Risk engine (Ibrahim) |
+| `intel.recommendation` | MVP | H | Deterministic, structured suggestion derived from a risk (e.g. | Recommendation engine (Ibrahim) |
+| `intel.briefing` | SHOULD | H | Cached daily morning briefing (`Explanation` subtype report) built from existing risks and pending proposals. | Briefing job (Ibrahim) |
+| `audit.llm_usage` | MVP | A | One row per LLM layer call (and per cache hit that avoided a call): provider, model, prompt version, tokens, estimated cost, latency, outcome, trace. | LLM layer `llm/client.py` (Ibrahim) |
+| `audit.audit_log` | MVP | A | Brain audit trail: who proposed, approved/rejected, executed, which tool, which payload fingerprint, outcome, trace. | Audit writer `observability/audit.py` (Ibrahim) called by Approval Engine, Orchestrator, Registry |
+| `agent.agent_session` | MVP | A | Conversation/agent session: owner, small working context, tool allow-list, write cap, expiry. | Orchestrator (Ibrahim) |
+| `agent.agent_message` | MVP | A | Recent conversation turns (the 'last N messages' memory). | Orchestrator |
+| `agent.action_proposal` | MVP | A | The immutable proposed write (tool + arguments) awaiting a human decision, plus its lifecycle status. | Proposal service (rules) or assistant (agent) creates with status pending; approval and execution services transition it |
+| `agent.agent_action` | MVP | A | Log of every tool call the agent attempted, including rejected ones (unknown tool, bad arguments, policy deny). | Tool Registry / Orchestrator (Ibrahim) |
+| `agent.action_approval` | MVP | A | Immutable human decision (approve or reject) on a specific proposal payload. | Approval Engine (Ibrahim) via `POST /agent/proposals/{id}/approve\|reject`, scope `agent:approve` |
+| `agent.action_execution` | MVP | A | One row per execution attempt of an approved proposal against the Canonical API. | Approval Engine / execution step after approval (Ibrahim; write path contract with Yassin) |
+| `ingest.tenant_registry` | MVP | O | Stable registry of the tenants (ERP organizations) this Brain serves, with a REFERENCE to each tenant's Canonical API credential (never the secret). | Provisioning command only (`brain-provision` login granted brain_provisioner, N-01): create, validate credential, activate, rotate, suspend |
+| `rag.embedding` | FUTURE | R | FUTURE ONLY. | RAG ingestion job (future) |
+
+Views (no storage): `intel.v_insight_current`, `intel.v_alert_open`, `agent.v_agent_action`.
+
+---
+
+## 7. Database-Wide Conventions
+
+### 7.1 Identifier taxonomy
+
+| Kind | Type | Column naming | Referential integrity |
+|---|---|---|---|
+| Internal Brain UUID | `UUID` (`gen_random_uuid()`) | `id`, `<parent>_id` | **True FK**, always composite with `tenant_id` |
+| Tenant | `UUID` | `tenant_id` | External reference. Validated from the JWT claim or event envelope against an allow-list (MVP: one seeded tenant). No Brain tenant table: the ERP/identity service owns tenants |
+| Canonical product / supplier | `UUID` | `product_id`, `supplier_id` | External reference (contract). Not a FK; existence is checked lazily through `canonical_cache` |
+| Other canonical identifier | `TEXT` | `entity_id` | Cache key only |
+| ERP event | `UUID` | `event_id` | External reference |
+| Model version | `TEXT` label + `UUID` | `model_version` (label, unique per tenant), `model_id` (FK) | True FK on `model_id` |
+| Trace / span | `CHAR(32)` / `CHAR(16)` lowercase hex (W3C) | `trace_id`, `span_id` | Soft reference, CHECK-validated |
+| Principal (JWT `sub`) | `TEXT` (<= 128) | `*_actor_id` | Soft reference; identity service owns users |
+| Idempotency key | `UUID` | `idempotency_key` | Unique per tenant |
+
+### 7.2 Tenancy
+
+`tenant_id UUID NOT NULL` with **no default** on every table (D-34 removed the seeded default). Application code always sets it from the verified tenant context: the JWT for brain-api, the tenant registry entry being processed for brain-worker. Every UNIQUE constraint and every FK that can include `tenant_id` does. Row-level security (N-02) adds a database-enforced filter on the transaction-local `app.tenant_id`. Grain (N-05): sales, features and forecasts are per `(tenant_id, product_id, business_date)` for the whole organization; there is no branch or location key in the MVP. Details in Part 3, section 2.
+
+### 7.3 Time
+
+All instants are `TIMESTAMPTZ` stored in UTC. Business dates (`sales_date`, `feature_date`, `target_date`, `business_date`) are `DATE` in the tenant business timezone (OD-03); timezone comes from `rule_config(platform)`, never from the server. `occurred_at` is the ERP clock; `processed_at` / `synced_at` / `computed_at` / `generated_at` are Brain clocks. Never use `timestamp without time zone`.
+
+### 7.4 Audit columns and keys
+
+| Pattern | Applies to | Columns |
+|---|---|---|
+| Mutable entity | `canonical_cache`, `sales_fact`, `rule_config`, `training_run`, `model_registry`, `anomaly_event`, `recommendation`, `agent_session`, `action_proposal`, `ingest_failure`, `sync_checkpoint`, `sales_day_coverage`, `calendar_day`, `briefing` | `created_at`, `updated_at` (trigger-maintained) |
+| Append-only / immutable | `model_evaluation`, `forecast`, `forecast_point`, `agent_message`, `agent_action`, `action_approval`, `audit_log`, `llm_usage` | One event timestamp, no `updated_at`; UPDATE forbidden by trigger |
+| Write-once lifecycle | `action_execution` | Inserted as `started`; its completion fields may be set exactly once, then the row is final; DELETE forbidden |
+| Versioned results | `risk_assessment` | `calculated_at`, `last_confirmed_at`, `superseded_at` |
+| Actor columns | Only where a human or agent actor exists: `rule_config.created_by`, `anomaly_event.reviewed_by`, `agent_session.user_actor_id`, `action_proposal.requested_by_actor_id`, `action_approval.decided_by_actor_id`, `action_execution.on_behalf_of_actor_id`, `audit_log.actor_*` | Pipeline-written tables record `trigger`/`compute_mode`/`source_mode` instead |
+
+### 7.5 Deletion
+
+No soft deletion in the Brain (G§14.2 limits it to the ERP). Rebuildable data is deleted by retention jobs run as the `brain_retention` role; audit-critical tables have no delete path.
+
+### 7.6 Enum strategy
+
+`TEXT` plus a named `CHECK (col IN (...))` (RC-10), mirrored by a Pydantic `Literal`. Adding a value: `ALTER TABLE ... DROP CONSTRAINT ...; ALTER TABLE ... ADD CONSTRAINT ... NOT VALID; VALIDATE CONSTRAINT ...`.
+
+### 7.7 Naming
+
+| Object | Pattern | Example |
+|---|---|---|
+| Schema | lowercase short noun | `intel` |
+| Table | singular snake_case | `forecast_point` |
+| Primary key | `pk_<table>` | `pk_sales_fact` |
+| Foreign key | `fk_<child>__<parent>` | `fk_forecast_point__forecast` |
+| Unique | `uq_<table>__<what>` | `uq_sales_fact__tenant_product_date` |
+| Check | `ck_<table>__<rule>` | `ck_forecast__horizon` |
+| Index | `ix_<table>__<columns or purpose>` | `ix_forecast__tenant_product_generated` |
+| Trigger | `trg_<table>_<purpose>` | `trg_action_proposal_transition` |
+| View | `v_<name>` | `v_insight_current` |
+| Function | `brain_<purpose>` in `public`; `agent.guard_*` | `brain_guard_update` |
+
+### 7.8 JSONB
+
+Used only for payloads whose shape is flexible, versioned elsewhere, or not queried by field. Every JSONB column has a `jsonb_typeof` CHECK (object or array), a Pydantic model with `extra="forbid"` in `contracts_jsonb.py`, and a size cap where unbounded growth is possible. Fields that are known and frequently queried are real columns (for example `backtest_wape`, `days_of_cover`, `severity`). No GIN indexes in the MVP because no JSONB field is filtered on.
+
+| Column | Why JSONB is appropriate |
+|---|---|
+| `canonical_cache.payload` | Foreign (Canonical) schema stored as received |
+| `forecast.factors`, `anomaly_event.reasons` | Variable-length explanation lists |
+| `risk_assessment.calculation`, `recommendation.calculation` | Rule trace / formula inputs for explanation, not queried |
+| `recommendation.payload`, `action_proposal.arguments` | Tool-shaped payload that must equal the tool `input_schema` |
+| `model_registry.hyperparameters/metrics`, `training_run.config_snapshot`, `model_evaluation.details` | Family-specific parameters and per-fold detail |
+| `rule_config.params` | Per-rule-set parameter object |
+| `agent_session.state`, `agent_message.structured`, `agent_action.arguments/result_summary`, `action_execution.result` | Small structured agent artefacts |
+| `audit_log.details`, `ingest_failure.payload_excerpt` | Allow-listed sanitised context |
+| `briefing.content`, `rag.embedding.metadata` | Report body / document metadata |
+
+### 7.9 Concurrency and idempotency
+
+- **Optimistic concurrency** (`row_version`): `agent_session`, `action_proposal`, `anomaly_event`, `recommendation`. Update with `WHERE id = :id AND row_version = :v` and increment.
+- **State machines** use compare-and-set on `status` (`UPDATE ... WHERE status = 'pending'`) and are additionally guarded by triggers.
+- **Single-writer jobs** take `pg_try_advisory_xact_lock(hashtext(tenant || resource))`.
+- **Idempotency layers:** `sales_fact` (absolute upsert keyed (tenant, product, date); newest ERP `updated_at` wins), forecasts (`UNIQUE (tenant, product, model, job_run_id)`), anomalies (natural-key upsert), proposals (`UNIQUE (tenant, idempotency_key)`), ERP writes (`Idempotency-Key`, one success per proposal).
+
+### 7.10 Schema evolution
+
+Additive-first (expand, migrate, contract). Never edit an applied migration. Data backfills run as separate jobs, not Alembic revisions. A feature column change = additive column + `feature_set_version` bump + full nightly recompute. Shared contract changes go through the `/contracts` PR process (G§15.2); `contracts_jsonb.py` is generated from `/contracts` once those exist (G§15.2 rule 6: nobody hand-writes shared types), and the hand-written version here is the proposal and interim.
+
+---
+
+## 8. ERDs
+
+### 8.1 Conceptual ERD
+
+```mermaid
+erDiagram
+    ERP_CANONICAL_API ||--o{ INGESTION_STATE : "polled daily totals (watermark)"
+    ERP_CANONICAL_API ||--o{ CANONICAL_CACHE : "validated payloads"
+    INGESTION_STATE ||--o{ SALES_FACT : "absolute upsert by product+date"
+    SALES_FACT ||--o{ FEATURE_ROW : "feeds"
+    CALENDAR ||--o{ FEATURE_ROW : "calendar features"
+    TRAINING_RUN ||--o{ MODEL : "produces"
+    MODEL ||--o{ FORECAST : "generates"
+    FEATURE_ROW ||--o{ FORECAST : "inputs"
+    FORECAST ||--o{ ANOMALY_EVENT : "expected value"
+    FORECAST ||--o{ RISK_ASSESSMENT : "demand over lead time"
+    CANONICAL_CACHE ||--o{ RISK_ASSESSMENT : "inventory and lead time inputs"
+    ANOMALY_EVENT |o--o{ RISK_ASSESSMENT : "may escalate"
+    RULE_CONFIG ||--o{ RISK_ASSESSMENT : "parameters used"
+    RISK_ASSESSMENT ||--o{ RECOMMENDATION : "answered by"
+    AGENT_SESSION ||--o{ AGENT_MESSAGE : "turns"
+    AGENT_SESSION ||--o{ TOOL_CALL : "tool calls"
+    AGENT_SESSION ||--o{ ACTION_PROPOSAL : "write proposals"
+    RECOMMENDATION |o--o{ ACTION_PROPOSAL : "source of"
+    ACTION_PROPOSAL ||--o{ APPROVAL : "human decision"
+    APPROVAL ||--o{ EXECUTION : "authorises"
+    ACTION_PROPOSAL ||--o{ EXECUTION : "attempts"
+    ACTION_PROPOSAL ||..o{ AUDIT_LOG : "audited"
+    LLM_USAGE ||..o{ AUDIT_LOG : "same trace"
+```
+
+### 8.2 Logical ERD - all tables, key columns only
+
+Solid lines are enforced foreign keys. Dashed lines are logical or soft references (no FK; see section 9.2).
+
+```mermaid
+erDiagram
+    sync_checkpoint {
+        uuid tenant_id PK
+        text resource PK
+        timestamptz high_watermark
+        text cursor
+        text last_status
+        timestamptz last_started_at
+        timestamptz last_finished_at
+        text last_error_code
+        int consecutive_failures
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    ingest_failure {
+        uuid id PK
+        uuid tenant_id
+        text failure_kind
+        text resource
+        text error_code
+        text error_message
+        jsonb payload_excerpt
+        int attempts
+        text status
+        timestamptz first_failed_at
+        timestamptz last_failed_at
+        timestamptz resolved_at
+        text resolved_by
+        text resolution
+        char trace_id
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    canonical_cache {
+        uuid id PK
+        uuid tenant_id
+        text entity_type
+        text entity_id
+        text schema_name
+        text schema_version
+        jsonb payload
+        char payload_sha256
+        timestamptz source_updated_at
+        timestamptz synced_at
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    sales_fact {
+        uuid id PK
+        uuid tenant_id
+        uuid product_id
+        date sales_date
+        numeric units_sold
+        numeric units_returned
+        numeric net_units
+        text day_status
+        bool is_complete
+        timestamptz source_updated_at
+        text source_mode
+        timestamptz polled_at
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    sales_day_coverage {
+        uuid tenant_id PK
+        date business_date PK
+        text status
+        text verified_via
+        timestamptz verified_at
+        text gap_reason
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    calendar_day {
+        uuid tenant_id PK
+        date calendar_date PK
+        bool is_holiday
+        text holiday_name
+        bool is_ramadan
+        bool is_flu_season
+        text source
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    feature_daily {
+        uuid tenant_id PK
+        uuid product_id PK
+        date feature_date PK
+        smallint feature_set_version
+        numeric y_units
+        text y_status
+        bool is_outlier
+        int history_days
+        smallint n_obs_7
+        smallint n_obs_28
+        numeric lag_1
+        numeric lag_7
+        numeric lag_14
+        numeric lag_28
+        numeric roll_mean_7
+        numeric roll_mean_14
+        numeric roll_mean_28
+        numeric roll_std_7
+        numeric roll_std_28
+        smallint dow
+        smallint month
+        smallint day_of_month
+        smallint week_of_year
+        bool is_holiday
+        bool is_ramadan
+        bool is_flu_season
+        bool is_promotion
+        timestamptz computed_at
+        text compute_mode
+        timestamptz inputs_max_updated_at
+    }
+    rule_config {
+        uuid id PK
+        uuid tenant_id
+        text rule_set
+        int version
+        text version_label
+        jsonb params
+        bool is_active
+        timestamptz effective_from
+        text created_by
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    training_run {
+        uuid id PK
+        uuid tenant_id
+        text purpose
+        text trigger
+        text status
+        timestamptz started_at
+        timestamptz finished_at
+        int products_requested
+        int products_trained
+        int products_skipped
+        int products_failed
+        smallint feature_set_version
+        uuid rule_config_id FK
+        text code_version
+        jsonb config_snapshot
+        text error_summary
+        char trace_id
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    model_registry {
+        uuid id PK
+        uuid tenant_id
+        uuid product_id
+        text scope
+        uuid shared_model_id FK
+        text purpose
+        text model_family
+        text model_version
+        text status
+        uuid training_run_id FK
+        smallint feature_set_version
+        timestamptz trained_at
+        date train_data_start
+        date train_data_end
+        jsonb hyperparameters
+        numeric backtest_wape
+        numeric baseline_wape
+        jsonb metrics
+        text artifact_path
+        text artifact_format
+        char artifact_sha256
+        bigint artifact_size_bytes
+        text code_version
+        timestamptz validated_at
+        timestamptz degraded_at
+        timestamptz retired_at
+        text status_reason
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    model_evaluation {
+        uuid id PK
+        uuid tenant_id
+        uuid model_id FK
+        text evaluation_type
+        text metric_name
+        numeric metric_value
+        numeric baseline_value
+        int n_obs
+        date window_start
+        date window_end
+        timestamptz evaluated_at
+        jsonb details
+    }
+    forecast {
+        uuid id PK
+        uuid tenant_id
+        uuid product_id
+        uuid model_id FK
+        uuid job_run_id
+        date origin_date
+        timestamptz generated_at
+        smallint horizon_days
+        text trigger
+        text forecast_confidence
+        bool cold_start
+        int history_days
+        text interval_method
+        numeric interval_coverage
+        smallint feature_set_version
+        timestamptz inputs_max_updated_at
+        text_array quality_flags
+        jsonb factors
+        char trace_id
+        timestamptz created_at
+    }
+    forecast_point {
+        uuid forecast_id PK, FK
+        uuid tenant_id
+        date target_date PK
+        numeric predicted_demand
+        numeric confidence_low
+        numeric confidence_high
+    }
+    anomaly_event {
+        uuid id PK
+        uuid tenant_id
+        uuid product_id
+        date observation_date
+        text anomaly_type
+        text detection_method
+        numeric expected_value
+        numeric observed_value
+        numeric zscore
+        numeric score
+        text severity
+        jsonb reasons
+        text rule_version
+        uuid rule_config_id FK
+        uuid model_id FK
+        uuid forecast_id FK
+        text status
+        text reviewed_by
+        timestamptz reviewed_at
+        timestamptz first_detected_at
+        timestamptz last_detected_at
+        int detection_count
+        int row_version
+        char trace_id
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    risk_assessment {
+        uuid id PK
+        uuid tenant_id
+        uuid product_id
+        uuid supplier_id
+        text risk_type
+        text severity
+        numeric confidence
+        numeric input_available_quantity
+        timestamptz inventory_as_of
+        text inventory_source
+        numeric demand_per_day
+        numeric demand_over_lead_time
+        numeric demand_over_lead_time_upper
+        numeric days_of_cover
+        numeric lead_time_days
+        timestamptz supplier_as_of
+        uuid forecast_id FK
+        uuid anomaly_event_id FK
+        text rule_version
+        uuid rule_config_id FK
+        jsonb calculation
+        timestamptz calculated_at
+        timestamptz last_confirmed_at
+        timestamptz superseded_at
+        uuid superseded_by_id FK
+        char trace_id
+    }
+    recommendation {
+        uuid id PK
+        uuid tenant_id
+        uuid product_id
+        uuid supplier_id
+        uuid risk_assessment_id FK
+        uuid forecast_id FK
+        text recommendation_type
+        jsonb payload
+        jsonb calculation
+        text status
+        timestamptz generated_at
+        timestamptz expires_at
+        timestamptz superseded_at
+        uuid superseded_by_id FK
+        text rule_version
+        uuid rule_config_id FK
+        int row_version
+        char trace_id
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    briefing {
+        uuid id PK
+        uuid tenant_id
+        date briefing_date
+        jsonb content
+        text generated_by
+        uuid llm_usage_id
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    llm_usage {
+        uuid id PK
+        uuid tenant_id
+        timestamptz occurred_at
+        text purpose
+        text provider
+        text model
+        text model_route
+        text prompt_name
+        text prompt_version
+        int tokens_in
+        int tokens_out
+        int tokens_cached_in
+        numeric estimated_cost_usd
+        text pricing_version
+        int latency_ms
+        text cache_status
+        text outcome
+        text error_code
+        bool schema_valid
+        char prompt_sha256
+        text actor_id
+        uuid session_id
+        smallint tool_step
+        char trace_id
+        char span_id
+    }
+    audit_log {
+        uuid id PK
+        bigint seq UK
+        uuid tenant_id
+        timestamptz occurred_at
+        text event_type
+        text outcome
+        text actor_type
+        text actor_id
+        text on_behalf_of_actor_id
+        text approved_by_actor_id
+        text tool_name
+        text subject_type
+        uuid subject_id
+        char arguments_sha256
+        jsonb details
+        char trace_id
+        char span_id
+        text request_id
+    }
+    agent_session {
+        uuid id PK
+        uuid tenant_id
+        text user_actor_id
+        text status
+        jsonb state
+        text_array allowed_tools
+        smallint max_writes
+        smallint write_proposals_count
+        timestamptz started_at
+        timestamptz last_activity_at
+        timestamptz expires_at
+        int row_version
+        char trace_id
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    agent_message {
+        uuid id PK
+        uuid tenant_id
+        uuid session_id FK
+        int turn_index
+        text role
+        text content
+        bool pii_scrubbed
+        jsonb structured
+        uuid llm_usage_id
+        timestamptz created_at
+        timestamptz expires_at
+    }
+    action_proposal {
+        uuid id PK
+        uuid tenant_id
+        uuid session_id FK
+        text requested_by_actor_id
+        text proposed_by
+        text tool_name
+        text tool_version
+        jsonb arguments
+        char arguments_sha256
+        bool requires_approval
+        text policy_version
+        text reason
+        uuid recommendation_id FK
+        uuid risk_assessment_id FK
+        uuid llm_usage_id FK
+        uuid idempotency_key
+        text status
+        timestamptz status_changed_at
+        timestamptz expires_at
+        int row_version
+        char trace_id
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    agent_action {
+        uuid id PK
+        uuid tenant_id
+        uuid session_id FK
+        int turn_index
+        text tool_name
+        text tool_version
+        bool read_only
+        bool requires_approval
+        jsonb arguments
+        char arguments_sha256
+        text outcome
+        uuid proposal_id FK
+        jsonb result_summary
+        text error_code
+        int duration_ms
+        uuid llm_usage_id
+        char trace_id
+        timestamptz created_at
+    }
+    action_approval {
+        uuid id PK
+        uuid tenant_id
+        uuid proposal_id FK
+        smallint approval_round
+        text decision
+        text decided_by_actor_id
+        text_array decider_scopes
+        char arguments_sha256 FK
+        text reason_code
+        timestamptz decided_at
+        char trace_id
+    }
+    action_execution {
+        uuid id PK
+        uuid tenant_id
+        uuid proposal_id FK
+        uuid approval_id FK
+        smallint attempt_no
+        char arguments_sha256 FK
+        uuid idempotency_key FK
+        text on_behalf_of_actor_id
+        text status
+        text outcome_certainty
+        timestamptz started_at
+        timestamptz completed_at
+        int duration_ms
+        smallint canonical_http_status
+        text external_ref_type
+        text external_ref_id
+        text error_code
+        text error_message
+        jsonb result
+        char trace_id
+    }
+    tenant_registry {
+        uuid tenant_id PK
+        text display_label
+        text status
+        text status_reason
+        text credential_ref
+        char credential_sha256
+        int credential_version
+        timestamptz credential_validated_at
+        timestamptz activated_at
+        timestamptz suspended_at
+        text provisioned_by
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    rule_config |o--o{ training_run : "rule_config"
+    training_run ||--o{ model_registry : "training_run"
+    model_registry |o--o{ model_registry : "shared_model"
+    model_registry ||--o{ model_evaluation : "model"
+    model_registry ||--o{ forecast : "model"
+    forecast ||--o{ forecast_point : "forecast"
+    rule_config ||--o{ anomaly_event : "rule_config"
+    model_registry |o--o{ anomaly_event : "model"
+    forecast |o--o{ anomaly_event : "forecast"
+    forecast |o--o{ risk_assessment : "forecast"
+    anomaly_event |o--o{ risk_assessment : "anomaly_event"
+    rule_config ||--o{ risk_assessment : "rule_config"
+    risk_assessment |o--o{ risk_assessment : "superseded_by"
+    risk_assessment ||--o{ recommendation : "risk_assessment"
+    forecast |o--o{ recommendation : "forecast"
+    rule_config ||--o{ recommendation : "rule_config"
+    recommendation |o--o{ recommendation : "superseded_by"
+    agent_session ||--o{ agent_message : "session"
+    agent_session |o--o{ action_proposal : "session"
+    recommendation |o--o{ action_proposal : "recommendation"
+    risk_assessment |o--o{ action_proposal : "risk_assessment"
+    llm_usage |o--o{ action_proposal : "llm_usage"
+    agent_session ||--o{ agent_action : "session"
+    action_proposal |o--o{ agent_action : "proposal"
+    action_proposal ||--o{ action_approval : "proposal"
+    action_approval ||--o{ action_execution : "approval"
+    action_proposal ||--o{ action_execution : "proposal"
+    sales_fact ||..o{ feature_daily : "logical product+date"
+    calendar_day ||..o{ feature_daily : "logical date"
+    sales_day_coverage ||..o{ feature_daily : "logical zero vs missing"
+    llm_usage ||..o{ agent_action : "soft ref"
+    llm_usage ||..o{ agent_message : "soft ref"
+    agent_session ||..o{ llm_usage : "soft ref"
+```
+
+### 8.3 Focused ERD - ingestion, `sales_fact`, features
+
+```mermaid
+erDiagram
+    sync_checkpoint {
+        uuid tenant_id PK
+        text resource PK
+        timestamptz high_watermark
+        text cursor
+        text last_status
+        timestamptz last_started_at
+        timestamptz last_finished_at
+        text last_error_code
+        int consecutive_failures
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    ingest_failure {
+        uuid id PK
+        uuid tenant_id
+        text failure_kind
+        text resource
+        text error_code
+        text error_message
+        jsonb payload_excerpt
+        int attempts
+        text status
+        timestamptz first_failed_at
+        timestamptz last_failed_at
+        timestamptz resolved_at
+        text resolved_by
+        text resolution
+        char trace_id
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    canonical_cache {
+        uuid id PK
+        uuid tenant_id
+        text entity_type
+        text entity_id
+        text schema_name
+        text schema_version
+        jsonb payload
+        char payload_sha256
+        timestamptz source_updated_at
+        timestamptz synced_at
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    sales_fact {
+        uuid id PK
+        uuid tenant_id
+        uuid product_id
+        date sales_date
+        numeric units_sold
+        numeric units_returned
+        numeric net_units
+        text day_status
+        bool is_complete
+        timestamptz source_updated_at
+        text source_mode
+        timestamptz polled_at
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    sales_day_coverage {
+        uuid tenant_id PK
+        date business_date PK
+        text status
+        text verified_via
+        timestamptz verified_at
+        text gap_reason
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    calendar_day {
+        uuid tenant_id PK
+        date calendar_date PK
+        bool is_holiday
+        text holiday_name
+        bool is_ramadan
+        bool is_flu_season
+        text source
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    feature_daily {
+        uuid tenant_id PK
+        uuid product_id PK
+        date feature_date PK
+        smallint feature_set_version
+        numeric y_units
+        text y_status
+        bool is_outlier
+        int history_days
+        smallint n_obs_7
+        smallint n_obs_28
+        numeric lag_1
+        numeric lag_7
+        numeric lag_14
+        numeric lag_28
+        numeric roll_mean_7
+        numeric roll_mean_14
+        numeric roll_mean_28
+        numeric roll_std_7
+        numeric roll_std_28
+        smallint dow
+        smallint month
+        smallint day_of_month
+        smallint week_of_year
+        bool is_holiday
+        bool is_ramadan
+        bool is_flu_season
+        bool is_promotion
+        timestamptz computed_at
+        text compute_mode
+        timestamptz inputs_max_updated_at
+    }
+    sales_fact ||..o{ feature_daily : "logical product+date"
+    calendar_day ||..o{ feature_daily : "logical date"
+    sales_day_coverage ||..o{ feature_daily : "logical zero vs missing"
+```
+
+### 8.4 Focused ERD - forecasting, anomaly, risk, recommendation
+
+```mermaid
+erDiagram
+    rule_config {
+        uuid id PK
+        uuid tenant_id
+        text rule_set
+        int version
+        text version_label
+        jsonb params
+        bool is_active
+        timestamptz effective_from
+        text created_by
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    training_run {
+        uuid id PK
+        uuid tenant_id
+        text purpose
+        text trigger
+        text status
+        timestamptz started_at
+        timestamptz finished_at
+        int products_requested
+        int products_trained
+        int products_skipped
+        int products_failed
+        smallint feature_set_version
+        uuid rule_config_id FK
+        text code_version
+        jsonb config_snapshot
+        text error_summary
+        char trace_id
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    model_registry {
+        uuid id PK
+        uuid tenant_id
+        uuid product_id
+        text scope
+        uuid shared_model_id FK
+        text purpose
+        text model_family
+        text model_version
+        text status
+        uuid training_run_id FK
+        smallint feature_set_version
+        timestamptz trained_at
+        date train_data_start
+        date train_data_end
+        jsonb hyperparameters
+        numeric backtest_wape
+        numeric baseline_wape
+        jsonb metrics
+        text artifact_path
+        text artifact_format
+        char artifact_sha256
+        bigint artifact_size_bytes
+        text code_version
+        timestamptz validated_at
+        timestamptz degraded_at
+        timestamptz retired_at
+        text status_reason
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    model_evaluation {
+        uuid id PK
+        uuid tenant_id
+        uuid model_id FK
+        text evaluation_type
+        text metric_name
+        numeric metric_value
+        numeric baseline_value
+        int n_obs
+        date window_start
+        date window_end
+        timestamptz evaluated_at
+        jsonb details
+    }
+    forecast {
+        uuid id PK
+        uuid tenant_id
+        uuid product_id
+        uuid model_id FK
+        uuid job_run_id
+        date origin_date
+        timestamptz generated_at
+        smallint horizon_days
+        text trigger
+        text forecast_confidence
+        bool cold_start
+        int history_days
+        text interval_method
+        numeric interval_coverage
+        smallint feature_set_version
+        timestamptz inputs_max_updated_at
+        text_array quality_flags
+        jsonb factors
+        char trace_id
+        timestamptz created_at
+    }
+    forecast_point {
+        uuid forecast_id PK, FK
+        uuid tenant_id
+        date target_date PK
+        numeric predicted_demand
+        numeric confidence_low
+        numeric confidence_high
+    }
+    anomaly_event {
+        uuid id PK
+        uuid tenant_id
+        uuid product_id
+        date observation_date
+        text anomaly_type
+        text detection_method
+        numeric expected_value
+        numeric observed_value
+        numeric zscore
+        numeric score
+        text severity
+        jsonb reasons
+        text rule_version
+        uuid rule_config_id FK
+        uuid model_id FK
+        uuid forecast_id FK
+        text status
+        text reviewed_by
+        timestamptz reviewed_at
+        timestamptz first_detected_at
+        timestamptz last_detected_at
+        int detection_count
+        int row_version
+        char trace_id
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    risk_assessment {
+        uuid id PK
+        uuid tenant_id
+        uuid product_id
+        uuid supplier_id
+        text risk_type
+        text severity
+        numeric confidence
+        numeric input_available_quantity
+        timestamptz inventory_as_of
+        text inventory_source
+        numeric demand_per_day
+        numeric demand_over_lead_time
+        numeric demand_over_lead_time_upper
+        numeric days_of_cover
+        numeric lead_time_days
+        timestamptz supplier_as_of
+        uuid forecast_id FK
+        uuid anomaly_event_id FK
+        text rule_version
+        uuid rule_config_id FK
+        jsonb calculation
+        timestamptz calculated_at
+        timestamptz last_confirmed_at
+        timestamptz superseded_at
+        uuid superseded_by_id FK
+        char trace_id
+    }
+    recommendation {
+        uuid id PK
+        uuid tenant_id
+        uuid product_id
+        uuid supplier_id
+        uuid risk_assessment_id FK
+        uuid forecast_id FK
+        text recommendation_type
+        jsonb payload
+        jsonb calculation
+        text status
+        timestamptz generated_at
+        timestamptz expires_at
+        timestamptz superseded_at
+        uuid superseded_by_id FK
+        text rule_version
+        uuid rule_config_id FK
+        int row_version
+        char trace_id
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    canonical_cache {
+        uuid id PK
+    }
+    feature_daily {
+        uuid tenant_id PK
+        uuid product_id PK
+        date feature_date PK
+    }
+    rule_config |o--o{ training_run : "rule_config"
+    training_run ||--o{ model_registry : "training_run"
+    model_registry |o--o{ model_registry : "shared_model"
+    model_registry ||--o{ model_evaluation : "model"
+    model_registry ||--o{ forecast : "model"
+    forecast ||--o{ forecast_point : "forecast"
+    rule_config ||--o{ anomaly_event : "rule_config"
+    model_registry |o--o{ anomaly_event : "model"
+    forecast |o--o{ anomaly_event : "forecast"
+    forecast |o--o{ risk_assessment : "forecast"
+    anomaly_event |o--o{ risk_assessment : "anomaly_event"
+    rule_config ||--o{ risk_assessment : "rule_config"
+    risk_assessment |o--o{ risk_assessment : "superseded_by"
+    risk_assessment ||--o{ recommendation : "risk_assessment"
+    forecast |o--o{ recommendation : "forecast"
+    rule_config ||--o{ recommendation : "rule_config"
+    recommendation |o--o{ recommendation : "superseded_by"
+    feature_daily ||..o{ forecast : "logical inputs"
+    canonical_cache ||..o{ risk_assessment : "logical inputs"
+```
+
+### 8.5 Focused ERD - agent, approval, actions, audit
+
+```mermaid
+erDiagram
+    llm_usage {
+        uuid id PK
+        uuid tenant_id
+        timestamptz occurred_at
+        text purpose
+        text provider
+        text model
+        text model_route
+        text prompt_name
+        text prompt_version
+        int tokens_in
+        int tokens_out
+        int tokens_cached_in
+        numeric estimated_cost_usd
+        text pricing_version
+        int latency_ms
+        text cache_status
+        text outcome
+        text error_code
+        bool schema_valid
+        char prompt_sha256
+        text actor_id
+        uuid session_id
+        smallint tool_step
+        char trace_id
+        char span_id
+    }
+    audit_log {
+        uuid id PK
+        bigint seq UK
+        uuid tenant_id
+        timestamptz occurred_at
+        text event_type
+        text outcome
+        text actor_type
+        text actor_id
+        text on_behalf_of_actor_id
+        text approved_by_actor_id
+        text tool_name
+        text subject_type
+        uuid subject_id
+        char arguments_sha256
+        jsonb details
+        char trace_id
+        char span_id
+        text request_id
+    }
+    agent_session {
+        uuid id PK
+        uuid tenant_id
+        text user_actor_id
+        text status
+        jsonb state
+        text_array allowed_tools
+        smallint max_writes
+        smallint write_proposals_count
+        timestamptz started_at
+        timestamptz last_activity_at
+        timestamptz expires_at
+        int row_version
+        char trace_id
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    agent_message {
+        uuid id PK
+        uuid tenant_id
+        uuid session_id FK
+        int turn_index
+        text role
+        text content
+        bool pii_scrubbed
+        jsonb structured
+        uuid llm_usage_id
+        timestamptz created_at
+        timestamptz expires_at
+    }
+    action_proposal {
+        uuid id PK
+        uuid tenant_id
+        uuid session_id FK
+        text requested_by_actor_id
+        text proposed_by
+        text tool_name
+        text tool_version
+        jsonb arguments
+        char arguments_sha256
+        bool requires_approval
+        text policy_version
+        text reason
+        uuid recommendation_id FK
+        uuid risk_assessment_id FK
+        uuid llm_usage_id FK
+        uuid idempotency_key
+        text status
+        timestamptz status_changed_at
+        timestamptz expires_at
+        int row_version
+        char trace_id
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    agent_action {
+        uuid id PK
+        uuid tenant_id
+        uuid session_id FK
+        int turn_index
+        text tool_name
+        text tool_version
+        bool read_only
+        bool requires_approval
+        jsonb arguments
+        char arguments_sha256
+        text outcome
+        uuid proposal_id FK
+        jsonb result_summary
+        text error_code
+        int duration_ms
+        uuid llm_usage_id
+        char trace_id
+        timestamptz created_at
+    }
+    action_approval {
+        uuid id PK
+        uuid tenant_id
+        uuid proposal_id FK
+        smallint approval_round
+        text decision
+        text decided_by_actor_id
+        text_array decider_scopes
+        char arguments_sha256 FK
+        text reason_code
+        timestamptz decided_at
+        char trace_id
+    }
+    action_execution {
+        uuid id PK
+        uuid tenant_id
+        uuid proposal_id FK
+        uuid approval_id FK
+        smallint attempt_no
+        char arguments_sha256 FK
+        uuid idempotency_key FK
+        text on_behalf_of_actor_id
+        text status
+        text outcome_certainty
+        timestamptz started_at
+        timestamptz completed_at
+        int duration_ms
+        smallint canonical_http_status
+        text external_ref_type
+        text external_ref_id
+        text error_code
+        text error_message
+        jsonb result
+        char trace_id
+    }
+    risk_assessment {
+        uuid id PK
+        uuid forecast_id FK
+        uuid anomaly_event_id FK
+        uuid rule_config_id FK
+        uuid superseded_by_id FK
+    }
+    recommendation {
+        uuid id PK
+        uuid risk_assessment_id FK
+        uuid forecast_id FK
+        uuid superseded_by_id FK
+        uuid rule_config_id FK
+    }
+    risk_assessment |o--o{ risk_assessment : "superseded_by"
+    risk_assessment ||--o{ recommendation : "risk_assessment"
+    recommendation |o--o{ recommendation : "superseded_by"
+    agent_session ||--o{ agent_message : "session"
+    agent_session |o--o{ action_proposal : "session"
+    recommendation |o--o{ action_proposal : "recommendation"
+    risk_assessment |o--o{ action_proposal : "risk_assessment"
+    llm_usage |o--o{ action_proposal : "llm_usage"
+    agent_session ||--o{ agent_action : "session"
+    action_proposal |o--o{ agent_action : "proposal"
+    action_proposal ||--o{ action_approval : "proposal"
+    action_approval ||--o{ action_execution : "approval"
+    action_proposal ||--o{ action_execution : "proposal"
+    llm_usage ||..o{ agent_action : "soft ref"
+    llm_usage ||..o{ agent_message : "soft ref"
+    agent_session ||..o{ llm_usage : "soft ref"
+    action_proposal ||..o{ audit_log : "soft ref subject"
+```
+
+---
+
+## 9. Relationships and Cardinality
+
+### 9.1 Enforced foreign keys (physical overview)
+
+All intra-brain FKs include `tenant_id` in both the child and parent column lists. Where the parent column list is longer than `(tenant_id, id)`, the extra columns bind the child to a specific payload hash or idempotency key.
+
+| Child | FK constraint | Child columns | Parent | Parent columns | Cardinality | ON DELETE | Note |
+|---|---|---|---|---|---|---|---|
+| `intel.training_run` | `fk_training_run__rule_config` | tenant_id, rule_config_id | `intel.rule_config` | tenant_id, id | parent 0..1 : child 0..n | RESTRICT |  |
+| `intel.model_registry` | `fk_model_registry__training_run` | tenant_id, training_run_id | `intel.training_run` | tenant_id, id | parent 1 : child 0..n | RESTRICT |  |
+| `intel.model_registry` | `fk_model_registry__shared_model` | tenant_id, shared_model_id | `intel.model_registry` | tenant_id, id | parent 0..1 : child 0..n | RESTRICT | self reference: product row -> shared artifact row |
+| `intel.model_evaluation` | `fk_model_evaluation__model_registry` | tenant_id, model_id | `intel.model_registry` | tenant_id, id | parent 1 : child 0..n | CASCADE |  |
+| `intel.forecast` | `fk_forecast__model_registry` | tenant_id, model_id | `intel.model_registry` | tenant_id, id | parent 1 : child 0..n | RESTRICT |  |
+| `intel.forecast_point` | `fk_forecast_point__forecast` | tenant_id, forecast_id | `intel.forecast` | tenant_id, id | parent 1 : child 0..n | CASCADE |  |
+| `intel.anomaly_event` | `fk_anomaly_event__rule_config` | tenant_id, rule_config_id | `intel.rule_config` | tenant_id, id | parent 1 : child 0..n | RESTRICT |  |
+| `intel.anomaly_event` | `fk_anomaly_event__model_registry` | tenant_id, model_id | `intel.model_registry` | tenant_id, id | parent 0..1 : child 0..n | RESTRICT |  |
+| `intel.anomaly_event` | `fk_anomaly_event__forecast` | tenant_id, forecast_id | `intel.forecast` | tenant_id, id | parent 0..1 : child 0..n | RESTRICT |  |
+| `intel.risk_assessment` | `fk_risk_assessment__forecast` | tenant_id, forecast_id | `intel.forecast` | tenant_id, id | parent 0..1 : child 0..n | RESTRICT |  |
+| `intel.risk_assessment` | `fk_risk_assessment__anomaly_event` | tenant_id, anomaly_event_id | `intel.anomaly_event` | tenant_id, id | parent 0..1 : child 0..n | RESTRICT |  |
+| `intel.risk_assessment` | `fk_risk_assessment__rule_config` | tenant_id, rule_config_id | `intel.rule_config` | tenant_id, id | parent 1 : child 0..n | RESTRICT |  |
+| `intel.risk_assessment` | `fk_risk_assessment__superseded_by` | tenant_id, superseded_by_id | `intel.risk_assessment` | tenant_id, id | parent 0..1 : child 0..n | RESTRICT | self reference |
+| `intel.recommendation` | `fk_recommendation__risk_assessment` | tenant_id, risk_assessment_id | `intel.risk_assessment` | tenant_id, id | parent 1 : child 0..n | RESTRICT |  |
+| `intel.recommendation` | `fk_recommendation__forecast` | tenant_id, forecast_id | `intel.forecast` | tenant_id, id | parent 0..1 : child 0..n | RESTRICT |  |
+| `intel.recommendation` | `fk_recommendation__rule_config` | tenant_id, rule_config_id | `intel.rule_config` | tenant_id, id | parent 1 : child 0..n | RESTRICT |  |
+| `intel.recommendation` | `fk_recommendation__superseded_by` | tenant_id, superseded_by_id | `intel.recommendation` | tenant_id, id | parent 0..1 : child 0..n | RESTRICT | self reference |
+| `agent.agent_message` | `fk_agent_message__agent_session` | tenant_id, session_id | `agent.agent_session` | tenant_id, id | parent 1 : child 0..n | CASCADE |  |
+| `agent.action_proposal` | `fk_action_proposal__agent_session` | tenant_id, session_id | `agent.agent_session` | tenant_id, id | parent 0..1 : child 0..n | RESTRICT |  |
+| `agent.action_proposal` | `fk_action_proposal__recommendation` | tenant_id, recommendation_id | `intel.recommendation` | tenant_id, id | parent 0..1 : child 0..n | RESTRICT |  |
+| `agent.action_proposal` | `fk_action_proposal__risk_assessment` | tenant_id, risk_assessment_id | `intel.risk_assessment` | tenant_id, id | parent 0..1 : child 0..n | RESTRICT |  |
+| `agent.action_proposal` | `fk_action_proposal__llm_usage` | tenant_id, llm_usage_id | `audit.llm_usage` | tenant_id, id | parent 0..1 : child 0..n | RESTRICT |  |
+| `agent.agent_action` | `fk_agent_action__agent_session` | tenant_id, session_id | `agent.agent_session` | tenant_id, id | parent 1 : child 0..n | CASCADE |  |
+| `agent.agent_action` | `fk_agent_action__action_proposal` | tenant_id, proposal_id | `agent.action_proposal` | tenant_id, id | parent 0..1 : child 0..n | RESTRICT |  |
+| `agent.action_approval` | `fk_action_approval__action_proposal` | tenant_id, proposal_id, arguments_sha256 | `agent.action_proposal` | tenant_id, id, arguments_sha256 | parent 1 : child 0..n | RESTRICT | binds the decision to the exact payload hash |
+| `agent.action_execution` | `fk_action_execution__action_approval` | tenant_id, approval_id, proposal_id, arguments_sha256 | `agent.action_approval` | tenant_id, id, proposal_id, arguments_sha256 | parent 1 : child 0..n | RESTRICT | executed payload hash must equal the approved hash |
+| `agent.action_execution` | `fk_action_execution__action_proposal` | tenant_id, proposal_id, idempotency_key | `agent.action_proposal` | tenant_id, id, idempotency_key | parent 1 : child 0..n | RESTRICT | same idempotency key on every attempt |
+
+### 9.2 References that are deliberately not foreign keys
+
+| Table(s) | Column | Refers to | Validated by | Integrity |
+|---|---|---|---|---|
+| every table | tenant_id | ERP Identity (external) | JWT claim / event envelope; allow-list in MVP | no FK - contract + app-level validation |
+| sales_fact, feature_daily, forecast, model_registry, anomaly_event, risk_assessment, recommendation | product_id | Canonical Product (ERP) | Canonical contract; existence checked lazily via canonical_cache | no FK - external identifier (OD-02) |
+| risk_assessment, recommendation | supplier_id | Canonical Supplier (ERP) | canonical_cache(entity_type='supplier') | no FK - external identifier (OD-04) |
+| canonical_cache | entity_id | Canonical entity id | Canonical API | no FK - cache key |
+| feature_daily | (tenant, product, feature_date) | sales_fact (tenant, product, sales_date) | Feature pipeline; tests T-FEAT-01, T-FEAT-02 | logical only - feature rows exist for zero/missing/future days with no sales_fact row |
+| feature_daily | feature_date | calendar_day.calendar_date | Feature pipeline | logical (copied attributes) |
+| feature_daily | y_status | sales_day_coverage.status | Feature pipeline | logical (zero vs missing rule) |
+| agent_message, agent_action, briefing | llm_usage_id | audit.llm_usage.id | Application | soft reference: usage rows outlive messages; no FK |
+| llm_usage | session_id | agent.agent_session.id | Application | soft reference: audit rows outlive sessions; no FK |
+| audit_log | subject_type + subject_id | any Brain object | Audit writer vocabulary | soft polymorphic reference; audit must outlive subjects |
+| agent_action | turn_index | agent_message.turn_index | Application | soft reference: messages expire |
+
+### 9.3 Cardinality notes
+
+- One `training_run` has many `model_registry` rows; one model has many `forecast`s and `model_evaluation`s.
+- One `forecast` has ~`horizon_days` `forecast_point`s (primary key `(forecast_id, target_date)`).
+- Per `(tenant, product, risk_type)` there is exactly one *current* `risk_assessment` and any number of superseded ones.
+- Per `(tenant, product, recommendation_type)` there is at most one `active` `recommendation`.
+- One `action_proposal` has: at most one approval per `approval_round`; at most one in-flight and at most one successful `action_execution`; any number of failed attempts (`attempt_no`).

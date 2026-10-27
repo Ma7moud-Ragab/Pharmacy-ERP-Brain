@@ -1,0 +1,189 @@
+erDiagram
+    llm_usage {
+        uuid id PK
+        uuid tenant_id
+        timestamptz occurred_at
+        text purpose
+        text provider
+        text model
+        text model_route
+        text prompt_name
+        text prompt_version
+        int tokens_in
+        int tokens_out
+        int tokens_cached_in
+        numeric estimated_cost_usd
+        text pricing_version
+        int latency_ms
+        text cache_status
+        text outcome
+        text error_code
+        bool schema_valid
+        char prompt_sha256
+        text actor_id
+        uuid session_id
+        smallint tool_step
+        char trace_id
+        char span_id
+    }
+    audit_log {
+        uuid id PK
+        bigint seq UK
+        uuid tenant_id
+        timestamptz occurred_at
+        text event_type
+        text outcome
+        text actor_type
+        text actor_id
+        text on_behalf_of_actor_id
+        text approved_by_actor_id
+        text tool_name
+        text subject_type
+        uuid subject_id
+        char arguments_sha256
+        jsonb details
+        char trace_id
+        char span_id
+        text request_id
+    }
+    agent_session {
+        uuid id PK
+        uuid tenant_id
+        text user_actor_id
+        text status
+        jsonb state
+        text_array allowed_tools
+        smallint max_writes
+        smallint write_proposals_count
+        timestamptz started_at
+        timestamptz last_activity_at
+        timestamptz expires_at
+        int row_version
+        char trace_id
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    agent_message {
+        uuid id PK
+        uuid tenant_id
+        uuid session_id FK
+        int turn_index
+        text role
+        text content
+        bool pii_scrubbed
+        jsonb structured
+        uuid llm_usage_id
+        timestamptz created_at
+        timestamptz expires_at
+    }
+    action_proposal {
+        uuid id PK
+        uuid tenant_id
+        uuid session_id FK
+        text requested_by_actor_id
+        text proposed_by
+        text tool_name
+        text tool_version
+        jsonb arguments
+        char arguments_sha256
+        bool requires_approval
+        text policy_version
+        text reason
+        uuid recommendation_id FK
+        uuid risk_assessment_id FK
+        uuid llm_usage_id FK
+        uuid idempotency_key
+        text status
+        timestamptz status_changed_at
+        timestamptz expires_at
+        int row_version
+        char trace_id
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    agent_action {
+        uuid id PK
+        uuid tenant_id
+        uuid session_id FK
+        int turn_index
+        text tool_name
+        text tool_version
+        bool read_only
+        bool requires_approval
+        jsonb arguments
+        char arguments_sha256
+        text outcome
+        uuid proposal_id FK
+        jsonb result_summary
+        text error_code
+        int duration_ms
+        uuid llm_usage_id
+        char trace_id
+        timestamptz created_at
+    }
+    action_approval {
+        uuid id PK
+        uuid tenant_id
+        uuid proposal_id FK
+        smallint approval_round
+        text decision
+        text decided_by_actor_id
+        text_array decider_scopes
+        char arguments_sha256 FK
+        text reason_code
+        timestamptz decided_at
+        char trace_id
+    }
+    action_execution {
+        uuid id PK
+        uuid tenant_id
+        uuid proposal_id FK
+        uuid approval_id FK
+        smallint attempt_no
+        char arguments_sha256 FK
+        uuid idempotency_key FK
+        text on_behalf_of_actor_id
+        text status
+        text outcome_certainty
+        timestamptz started_at
+        timestamptz completed_at
+        int duration_ms
+        smallint canonical_http_status
+        text external_ref_type
+        text external_ref_id
+        text error_code
+        text error_message
+        jsonb result
+        char trace_id
+    }
+    risk_assessment {
+        uuid id PK
+        uuid forecast_id FK
+        uuid anomaly_event_id FK
+        uuid rule_config_id FK
+        uuid superseded_by_id FK
+    }
+    recommendation {
+        uuid id PK
+        uuid risk_assessment_id FK
+        uuid forecast_id FK
+        uuid superseded_by_id FK
+        uuid rule_config_id FK
+    }
+    risk_assessment |o--o{ risk_assessment : "superseded_by"
+    risk_assessment ||--o{ recommendation : "risk_assessment"
+    recommendation |o--o{ recommendation : "superseded_by"
+    agent_session ||--o{ agent_message : "session"
+    agent_session |o--o{ action_proposal : "session"
+    recommendation |o--o{ action_proposal : "recommendation"
+    risk_assessment |o--o{ action_proposal : "risk_assessment"
+    llm_usage |o--o{ action_proposal : "llm_usage"
+    agent_session ||--o{ agent_action : "session"
+    action_proposal |o--o{ agent_action : "proposal"
+    action_proposal ||--o{ action_approval : "proposal"
+    action_approval ||--o{ action_execution : "approval"
+    action_proposal ||--o{ action_execution : "proposal"
+    llm_usage ||..o{ agent_action : "soft ref"
+    llm_usage ||..o{ agent_message : "soft ref"
+    agent_session ||..o{ llm_usage : "soft ref"
+    action_proposal ||..o{ audit_log : "soft ref subject"

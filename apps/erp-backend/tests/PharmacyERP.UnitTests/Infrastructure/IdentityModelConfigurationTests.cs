@@ -48,7 +48,7 @@ public class IdentityModelConfigurationTests
 
             Assert.Equal("identity", entity.GetSchema());
             Assert.Equal(table, entity.GetTableName());
-            Assert.NotNull(entity.GetQueryFilter());
+            Assert.NotNull(entity.GetDeclaredQueryFilters());
         }
     }
 

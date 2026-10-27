@@ -35,5 +35,26 @@ public class AuditLogConfiguration : IEntityTypeConfiguration<AuditLog>
         builder.Property(x => x.AfterData).HasColumnName("after_data").HasColumnType("jsonb");
         builder.Property(x => x.TraceId).HasColumnName("trace_id").HasMaxLength(100).IsRequired();
         builder.Property(x => x.CreatedAt).HasColumnName("created_at").HasColumnType("timestamptz").IsRequired();
+
+        builder.HasOne(x => x.Branch)
+               .WithMany()
+               .HasForeignKey(x => new { x.OrganizationId, x.BranchId })
+               .HasPrincipalKey(b => new { b.OrganizationId, b.BranchId })
+               .IsRequired(false)
+               .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasOne(x => x.ActorUser)
+               .WithMany()
+               .HasForeignKey(x => new { x.OrganizationId, x.ActorUserId })
+               .HasPrincipalKey(u => new { u.OrganizationId, u.UserId })
+               .IsRequired(false)
+               .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasOne(x => x.ActorEmployee)
+               .WithMany()
+               .HasForeignKey(x => new { x.OrganizationId, x.ActorEmployeeId })
+               .HasPrincipalKey(e => new { e.OrganizationId, e.EmployeeId })
+               .IsRequired(false)
+               .OnDelete(DeleteBehavior.Restrict);
     }
 }

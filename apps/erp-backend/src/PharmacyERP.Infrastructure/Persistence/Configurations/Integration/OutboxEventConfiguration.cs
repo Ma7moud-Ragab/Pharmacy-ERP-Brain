@@ -36,5 +36,12 @@ public class OutboxEventConfiguration : IEntityTypeConfiguration<OutboxEvent>
                .WithMany()
                .HasForeignKey(x => x.OrganizationId)
                .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasOne(x => x.Branch)
+               .WithMany()
+               .HasForeignKey(x => new { x.OrganizationId, x.BranchId })
+               .HasPrincipalKey(b => new { b.OrganizationId, b.BranchId })
+               .IsRequired(false)
+               .OnDelete(DeleteBehavior.Restrict);
     }
 }

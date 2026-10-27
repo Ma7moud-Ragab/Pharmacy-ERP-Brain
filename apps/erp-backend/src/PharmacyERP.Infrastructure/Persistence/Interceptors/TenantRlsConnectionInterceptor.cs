@@ -16,53 +16,66 @@ public class TenantRlsConnectionInterceptor : DbCommandInterceptor
     public override InterceptionResult<DbDataReader> ReaderExecuting(
         DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result)
     {
-        EnforceTenantSecurity(command);
+        ValidateRlsAndTransactionGuard(command);
         return base.ReaderExecuting(command, eventData, result);
     }
 
     public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
         DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
     {
-        EnforceTenantSecurity(command);
+        ValidateRlsAndTransactionGuard(command);
         return base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
     }
 
     public override InterceptionResult<int> NonQueryExecuting(
         DbCommand command, CommandEventData eventData, InterceptionResult<int> result)
     {
-        EnforceTenantSecurity(command);
+        ValidateRlsAndTransactionGuard(command);
         return base.NonQueryExecuting(command, eventData, result);
     }
 
     public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
         DbCommand command, CommandEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
     {
-        EnforceTenantSecurity(command);
+        ValidateRlsAndTransactionGuard(command);
         return base.NonQueryExecutingAsync(command, eventData, result, cancellationToken);
     }
 
     public override InterceptionResult<object> ScalarExecuting(
         DbCommand command, CommandEventData eventData, InterceptionResult<object> result)
     {
-        EnforceTenantSecurity(command);
+        ValidateRlsAndTransactionGuard(command);
         return base.ScalarExecuting(command, eventData, result);
     }
 
     public override ValueTask<InterceptionResult<object>> ScalarExecutingAsync(
         DbCommand command, CommandEventData eventData, InterceptionResult<object> result, CancellationToken cancellationToken = default)
     {
-        EnforceTenantSecurity(command);
+        ValidateRlsAndTransactionGuard(command);
         return base.ScalarExecutingAsync(command, eventData, result, cancellationToken);
     }
 
-    private void EnforceTenantSecurity(DbCommand command)
+    private void ValidateRlsAndTransactionGuard(DbCommand command)
     {
-        if (_tenantContext.IsSystemBypassAllowed) return;
+        if (string.IsNullOrWhiteSpace(command.CommandText) ||
+            command.CommandText.Contains("set_config('app.", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        if (_tenantContext.IsSystemBypassEnabled)
+        {
+            return;
+        }
 
         if (command.Transaction == null)
-            throw new InvalidOperationException("PostgreSQL RLS requires an active transaction. No transaction found.");
+        {
+            throw new InvalidOperationException("Database commands on tenant-scoped tables must be executed within an active transaction.");
+        }
 
-        if (!_tenantContext.IsTenantBound || _tenantContext.OrganizationId == null)
-            throw new UnauthorizedAccessException("Tenant context is not bound. Cannot execute RLS-protected queries.");
+        if (!_tenantContext.IsTenantBound || !_tenantContext.OrganizationId.HasValue)
+        {
+            throw new UnauthorizedAccessException("Tenant context is not bound to a valid OrganizationId.");
+        }
     }
 }

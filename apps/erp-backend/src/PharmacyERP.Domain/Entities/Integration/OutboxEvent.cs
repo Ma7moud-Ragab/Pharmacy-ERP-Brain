@@ -1,4 +1,5 @@
-﻿using PharmacyERP.Domain.Exceptions;
+﻿using PharmacyERP.Domain.Entities.Identity;
+using PharmacyERP.Domain.Exceptions;
 
 namespace PharmacyERP.Domain.Entities.Integration;
 
@@ -16,6 +17,8 @@ public class OutboxEvent
     public int AttemptCount { get; private set; }
     public string? LastError { get; private set; }
     public string TraceId { get; private set; } = null!;
+
+    public Branch? Branch { get; private set; }
 
     private OutboxEvent() { }
 

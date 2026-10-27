@@ -1,4 +1,6 @@
-﻿namespace PharmacyERP.Domain.Entities.Integration;
+﻿using PharmacyERP.Domain.Entities.Identity;
+
+namespace PharmacyERP.Domain.Entities.Integration;
 
 public class OutboxEventCursor
 {
@@ -6,7 +8,9 @@ public class OutboxEventCursor
     public long LastEventSequence { get; private set; }
     public DateTimeOffset UpdatedAt { get; private set; }
 
-    private OutboxEventCursor() { } // For EF Core
+    public Organization Organization { get; private set; } = null!;
+
+    private OutboxEventCursor() { } 
 
     public OutboxEventCursor(Guid organizationId)
     {

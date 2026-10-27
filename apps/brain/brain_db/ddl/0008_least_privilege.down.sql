@@ -1,0 +1,30 @@
+-- 0008_least_privilege downgrade: restore the 0005-0007 grants and drop the rule-set audit triggers
+DROP TRIGGER IF EXISTS trg_rule_config_keep_active ON intel.rule_config;
+DROP TRIGGER IF EXISTS trg_rule_config_audit ON intel.rule_config;
+DROP FUNCTION IF EXISTS intel.check_rule_set_still_active();
+DROP FUNCTION IF EXISTS intel.audit_rule_config_change();
+REVOKE UPDATE (is_active) ON intel.rule_config FROM brain_provisioner;
+REVOKE INSERT ON audit.audit_log FROM brain_provisioner;
+REVOKE USAGE ON SCHEMA audit FROM brain_provisioner;
+GRANT INSERT, UPDATE ON ingest.sync_checkpoint TO brain_app;
+GRANT INSERT, UPDATE ON ingest.ingest_failure TO brain_app;
+GRANT INSERT, UPDATE, DELETE ON ingest.canonical_cache TO brain_app;
+GRANT INSERT, UPDATE ON ingest.sales_fact TO brain_app;
+GRANT INSERT, UPDATE ON ingest.sales_day_coverage TO brain_app;
+GRANT INSERT, UPDATE ON feat.calendar_day TO brain_app;
+REVOKE INSERT, UPDATE ON feat.calendar_day FROM brain_worker;
+GRANT INSERT, UPDATE ON feat.feature_daily TO brain_app;
+GRANT INSERT, UPDATE ON intel.rule_config TO brain_app;
+GRANT INSERT, UPDATE ON intel.training_run TO brain_app;
+GRANT INSERT, UPDATE ON intel.model_registry TO brain_app;
+GRANT INSERT ON intel.model_evaluation TO brain_app;
+GRANT INSERT ON intel.forecast TO brain_app;
+GRANT INSERT ON intel.forecast_point TO brain_app;
+GRANT INSERT, UPDATE ON intel.anomaly_event TO brain_app;
+GRANT INSERT, UPDATE ON intel.risk_assessment TO brain_app;
+GRANT INSERT, UPDATE ON intel.recommendation TO brain_app;
+DO $do$ BEGIN IF to_regclass('intel.briefing') IS NOT NULL THEN
+  EXECUTE 'GRANT INSERT, UPDATE ON intel.briefing TO brain_app';
+END IF; END $do$;
+REVOKE UPDATE (status, status_changed_at, row_version, updated_at) ON agent.action_proposal FROM brain_app;
+GRANT UPDATE ON agent.action_proposal TO brain_app;

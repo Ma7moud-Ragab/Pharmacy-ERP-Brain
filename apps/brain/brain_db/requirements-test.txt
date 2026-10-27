@@ -1,0 +1,7 @@
+# brain_db CI test dependencies (Stage 6). Pinned; versions verified with the 41-test suite on PostgreSQL 16.
+alembic==1.20.0
+psycopg[binary]==3.3.6
+pydantic==2.13.5
+pytest==9.1.1
+SQLAlchemy==2.1.6
+sqlmodel==0.0.48

@@ -8,15 +8,10 @@ public class DateTimeProvider : IDateTimeProvider
 
     public DateOnly GetOrganizationBusinessDate(string ianaTimeZoneId)
     {
-        try
-        {
-            var timeZone = TimeZoneInfo.FindSystemTimeZoneById(ianaTimeZoneId);
-            var localTime = TimeZoneInfo.ConvertTime(UtcNow, timeZone);
-            return DateOnly.FromDateTime(localTime.DateTime);
-        }
-        catch (TimeZoneNotFoundException)
-        {
-            return DateOnly.FromDateTime(UtcNow.DateTime);
-        }
+       
+        var timeZone = TimeZoneInfo.FindSystemTimeZoneById(ianaTimeZoneId);
+        var localDateTime = TimeZoneInfo.ConvertTimeFromUtc(UtcNow.UtcDateTime, timeZone);
+
+        return DateOnly.FromDateTime(localDateTime);
     }
 }

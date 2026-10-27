@@ -1,6 +1,7 @@
-﻿using Microsoft.AspNetCore.Http;
-using PharmacyERP.Application.Common.Interfaces.Context;
+﻿using System.Diagnostics;
 using System.Security.Claims;
+using Microsoft.AspNetCore.Http;
+using PharmacyERP.Application.Common.Interfaces.Context;
 
 namespace PharmacyERP.Infrastructure.Services.Context;
 
@@ -13,37 +14,124 @@ public class CurrentUser : ICurrentUser
         _httpContextAccessor = httpContextAccessor;
     }
 
-    private ClaimsPrincipal? User => _httpContextAccessor.HttpContext?.User;
+    private ClaimsPrincipal? Principal => _httpContextAccessor.HttpContext?.User;
 
-    public bool IsAuthenticated => User?.Identity?.IsAuthenticated ?? false;
+    public bool IsAuthenticated => Principal?.Identity?.IsAuthenticated == true;
 
-    public Guid? UserId => Guid.TryParse(User?.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? User?.FindFirst("sub")?.Value, out var id) ? id : null;
+    public Guid? UserId => TryGetGuidClaim(ClaimTypes.NameIdentifier) ?? TryGetGuidClaim("sub");
 
-    public Guid? EmployeeId => Guid.TryParse(User?.FindFirst("employee_id")?.Value, out var id) ? id : null;
+    public Guid? EmployeeId => TryGetGuidClaim("employee_id");
 
-    public Guid? OrganizationId => Guid.TryParse(User?.FindFirst("organization_id")?.Value, out var id) ? id : null;
+    public Guid? OrganizationId => TryGetGuidClaim("organization_id");
 
-    public string? Role => User?.FindFirst(ClaimTypes.Role)?.Value ?? User?.FindFirst("roles")?.Value;
+    public string? Role => Principal?.FindFirst(ClaimTypes.Role)?.Value ?? Principal?.FindFirst("role")?.Value;
 
-    public string? BranchScope => User?.FindFirst("branch_scope")?.Value;
+    public string? BranchScope => Principal?.FindFirst("branch_scope")?.Value;
 
-    public IReadOnlySet<Guid> AuthorizedBranchIds => User?.FindAll("branch_ids")
-        .Select(c => Guid.TryParse(c.Value, out var id) ? id : Guid.Empty)
-        .Where(id => id != Guid.Empty)
-        .ToHashSet() ?? new HashSet<Guid>();
+    public IReadOnlySet<Guid> AuthorizedBranchIds
+    {
+        get
+        {
+            if (!IsAuthenticated || Principal == null)
+            {
+                return new HashSet<Guid>();
+            }
 
-    public IReadOnlySet<string> Scopes => User?.FindAll("scopes")
-        .Select(c => c.Value)
-        .ToHashSet() ?? new HashSet<string>();
+            var branchClaims = Principal.FindAll("branch_ids").Select(c => c.Value);
+            var result = new HashSet<Guid>();
 
-    public string TraceId => _httpContextAccessor.HttpContext?.TraceIdentifier ?? Guid.NewGuid().ToString();
+            foreach (var claimValue in branchClaims)
+            {
+                foreach (var part in claimValue.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                {
+                    if (Guid.TryParse(part, out var branchId))
+                    {
+                        result.Add(branchId);
+                    }
+                }
+            }
+
+            return result;
+        }
+    }
+
+    public IReadOnlySet<string> Scopes
+    {
+        get
+        {
+            if (!IsAuthenticated || Principal == null)
+            {
+                return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            }
+
+            var scopeClaims = Principal.FindAll("scope").Concat(Principal.FindAll("scp")).Select(c => c.Value);
+            var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var raw in scopeClaims)
+            {
+                foreach (var item in raw.Split(new[] { ' ', ',' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                {
+                    result.Add(item);
+                }
+            }
+
+            return result;
+        }
+    }
+
+    public string TraceId
+    {
+        get
+        {
+            var httpContext = _httpContextAccessor.HttpContext;
+            if (httpContext != null)
+            {
+                if (httpContext.Items.TryGetValue("TraceId", out var itemTraceId) && itemTraceId is string s && !string.IsNullOrWhiteSpace(s))
+                {
+                    return s;
+                }
+
+                var traceparent = httpContext.Request.Headers["traceparent"].FirstOrDefault();
+                if (!string.IsNullOrWhiteSpace(traceparent))
+                {
+                    return traceparent;
+                }
+
+                var customHeader = httpContext.Request.Headers["X-Trace-Id"].FirstOrDefault();
+                if (!string.IsNullOrWhiteSpace(customHeader))
+                {
+                    return customHeader;
+                }
+
+                if (!string.IsNullOrWhiteSpace(httpContext.TraceIdentifier))
+                {
+                    return httpContext.TraceIdentifier;
+                }
+            }
+
+            return Activity.Current?.Id ?? $"00-{Guid.NewGuid():N}-{Guid.NewGuid().ToString("N")[..16]}-01";
+        }
+    }
 
     public bool CanAccessBranch(Guid branchId)
     {
-        if (!IsAuthenticated) return false;
+        if (!IsAuthenticated)
+        {
+            return false;
+        }
 
-        if (Role == "Admin" && BranchScope == "ALL") return true;
+        if (string.Equals(BranchScope, "ALL", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(Role, "Admin", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
 
         return AuthorizedBranchIds.Contains(branchId);
+    }
+
+    private Guid? TryGetGuidClaim(string claimType)
+    {
+        var value = Principal?.FindFirst(claimType)?.Value;
+        return Guid.TryParse(value, out var parsed) ? parsed : null;
     }
 }

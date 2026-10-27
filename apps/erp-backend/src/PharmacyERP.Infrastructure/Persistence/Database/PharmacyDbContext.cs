@@ -1,14 +1,12 @@
+using System.Reflection;
 using Microsoft.EntityFrameworkCore;
 using PharmacyERP.Application.Common.Interfaces.Context;
-using System.Linq.Expressions;
 
 namespace PharmacyERP.Infrastructure.Persistence.Database;
 
 public partial class PharmacyDbContext : DbContext
 {
     private readonly ITenantContext _tenantContext;
-
-    public Guid? CurrentOrganizationId => _tenantContext.OrganizationId;
 
     public PharmacyDbContext(DbContextOptions<PharmacyDbContext> options, ITenantContext tenantContext)
         : base(options)
@@ -24,27 +22,29 @@ public partial class PharmacyDbContext : DbContext
 
         foreach (var entityType in modelBuilder.Model.GetEntityTypes())
         {
-            var foreignKeys = entityType.GetForeignKeys().Where(fk => !fk.IsOwnership && fk.DeleteBehavior == DeleteBehavior.Cascade);
-            foreach (var fk in foreignKeys)
-            {
-                fk.DeleteBehavior = DeleteBehavior.Restrict;
-            }
-
+            // Apply Global Query Filter dynamically
             var orgIdProperty = entityType.FindProperty("OrganizationId");
             if (orgIdProperty != null && orgIdProperty.ClrType == typeof(Guid))
             {
-                var parameter = Expression.Parameter(entityType.ClrType, "e");
-                var property = Expression.Property(parameter, orgIdProperty.PropertyInfo!);
-                var currentOrgId = Expression.Property(
-                    Expression.Constant(this),
-                    nameof(CurrentOrganizationId)
-                );
+                var method = typeof(PharmacyDbContext)
+                    .GetMethod(nameof(ApplyTenantFilter), BindingFlags.NonPublic | BindingFlags.Instance)!
+                    .MakeGenericMethod(entityType.ClrType);
 
-                var filter = Expression.Equal(property, Expression.Convert(currentOrgId, typeof(Guid)));
-                var lambda = Expression.Lambda(filter, parameter);
+                method.Invoke(this, new object[] { modelBuilder });
+            }
 
-                entityType.SetQueryFilter(lambda);
+            // Enforce Restrict Delete Behavior
+            foreach (var foreignKey in entityType.GetForeignKeys())
+            {
+                foreignKey.DeleteBehavior = DeleteBehavior.Restrict;
             }
         }
+    }
+
+    private void ApplyTenantFilter<T>(ModelBuilder modelBuilder) where T : class
+    {
+        modelBuilder.Entity<T>().HasQueryFilter(e =>
+            _tenantContext.IsSystemBypassEnabled ||
+            EF.Property<Guid>(e, "OrganizationId") == _tenantContext.OrganizationId);
     }
 }
